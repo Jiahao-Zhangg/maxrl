@@ -173,17 +173,34 @@ CLIP_RATIO_HIGH=0.2
 GRAD_CLIP=0.3
 KL_COEFF=0.0
 TOTAL_EPOCHS=5
+LOSS_AGG_MODE=${MAXRL_LOSS_AGG_MODE:-token-mean}
 
 MODEL_PATH=Qwen/Qwen3-1.7B-Base
 MODEL_NAME=Qwen3-1.7B-Base
-ADVANTAGE_ESTIMATOR=maxrl
-PROJECT_NAME=Qwen3_MaxRL_Experiments
-EXPERIMENT_NAME=${ADVANTAGE_ESTIMATOR}_${MODEL_NAME}_math12k
+ADVANTAGE_ESTIMATOR=${MAXRL_ADVANTAGE_ESTIMATOR:-maxrl}
+PROJECT_NAME=${MAXRL_PROJECT_NAME:-Qwen3_MaxRL_Experiments}
+EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-${ADVANTAGE_ESTIMATOR}_${MODEL_NAME}_math12k}
 CHECKPOINT_SAVE_PATH=${MAXRL_OUTPUT_DIR}/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}
 TEST_DATASET_PATH="['${AIME25_DIR}/test.parquet','${MATH500_DIR}/test.parquet']"
 
+ALGORITHM_OVERRIDES=()
+if [[ "${ADVANTAGE_ESTIMATOR}" == "cost_aware_maxrl" ]]; then
+    COST_REFERENCE_TOKENS=${MAXRL_COST_REFERENCE_TOKENS:-$((MAX_RESPONSE_LENGTH / 2))}
+    MAX_INVERSE_COST=${MAXRL_MAX_INVERSE_COST:-4.0}
+    ALGORITHM_OVERRIDES+=(
+        "algorithm.cost_reference_tokens=${COST_REFERENCE_TOKENS}"
+        "algorithm.max_inverse_cost=${MAX_INVERSE_COST}"
+    )
+    echo "Cost-aware MaxRL: reference_tokens=${COST_REFERENCE_TOKENS}, inverse_cost_cap=${MAX_INVERSE_COST}"
+elif [[ "${ADVANTAGE_ESTIMATOR}" == "rb_cost_aware_maxrl" ]]; then
+    RB_COST_MAX_TOKENS=${MAXRL_RB_COST_MAX_TOKENS:-${MAX_RESPONSE_LENGTH}}
+    ALGORITHM_OVERRIDES+=("algorithm.rb_cost_max_tokens=${RB_COST_MAX_TOKENS}")
+    echo "RB cost-aware MaxRL: cost_max_tokens=${RB_COST_MAX_TOKENS}, zero-success update=zero"
+fi
+
 echo "Training ${MODEL_NAME} with hiyouga/math12k for ${TOTAL_EPOCHS} epochs"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "Advantage estimator: ${ADVANTAGE_ESTIMATOR}; loss aggregation: ${LOSS_AGG_MODE}"
 echo "Checkpoints: ${CHECKPOINT_SAVE_PATH}"
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
     echo "Note: the original logger configuration uses Weights & Biases; ensure 'wandb login' has been run."
@@ -208,6 +225,7 @@ python -W ignore -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_low="${CLIP_RATIO_LOW}" \
     actor_rollout_ref.actor.clip_ratio_high="${CLIP_RATIO_HIGH}" \
     actor_rollout_ref.actor.grad_clip="${GRAD_CLIP}" \
+    actor_rollout_ref.actor.loss_agg_mode="${LOSS_AGG_MODE}" \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
@@ -230,6 +248,7 @@ python -W ignore -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     algorithm.kl_penalty=low_var_kl \
     algorithm.kl_ctrl.kl_coef="${KL_COEFF}" \
+    "${ALGORITHM_OVERRIDES[@]}" \
     reward_model.reward_manager="${REWARD_MANAGER}" \
     trainer.balance_batch=True \
     trainer.critic_warmup=0 \

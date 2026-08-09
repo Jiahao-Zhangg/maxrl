@@ -68,6 +68,7 @@ verl is fast with:
    algo/ppo.md
    algo/grpo.md
    algo/dapo.md
+   algo/maxrl_gradient_estimators.md
    algo/spin.md
    algo/sppo.md
    algo/entropy.md

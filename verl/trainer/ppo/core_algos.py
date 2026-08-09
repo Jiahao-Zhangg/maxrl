@@ -23,7 +23,7 @@ __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 import math
 from collections import defaultdict
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 from verl.trainer.ppo.maclaurin import (
     maclaurin_weights, 
@@ -36,10 +36,8 @@ from einops import rearrange
 
 import numpy as np
 import torch
-import math
 
 import verl.utils.torch_functional as verl_F
-from typing import Tuple
 
 POLICY_LOSS_REGISTRY = {}
 
@@ -126,6 +124,8 @@ class AdvantageEstimator(str, Enum):
     GRPO_PASSK = "grpo_passk"
     GRPO_WITH_FILTERED_SFT = "grpo_with_filtered_sft"
     MAXRL = "maxrl"
+    COST_AWARE_MAXRL = "cost_aware_maxrl"
+    RB_COST_AWARE_MAXRL = "rb_cost_aware_maxrl"
     PKPO = "pkpo"
     MACLAURIN = "maclaurin"
     MACLAURIN_BASELINE = "maclaurin_baseline"
@@ -439,6 +439,241 @@ def compute_maxrl_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+def compute_cost_aware_maxrl_costs(
+    response_mask: torch.Tensor,
+    cost_reference_tokens: float,
+    max_inverse_cost: Optional[float] = 4.0,
+):
+    """Compute trajectory lengths, costs, capped inverse costs, and cap mask."""
+    if response_mask.ndim != 2:
+        raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
+
+    cost_reference_tokens = float(cost_reference_tokens)
+    if not math.isfinite(cost_reference_tokens) or cost_reference_tokens <= 0:
+        raise ValueError(f"cost_reference_tokens must be finite and positive, got {cost_reference_tokens}")
+
+    trajectory_lengths = response_mask.sum(dim=-1).to(dtype=torch.float32)
+    safe_trajectory_lengths = trajectory_lengths.clamp_min(1.0)
+    trajectory_costs = safe_trajectory_lengths / cost_reference_tokens
+    uncapped_inverse_costs = cost_reference_tokens / safe_trajectory_lengths
+
+    if max_inverse_cost is None:
+        inverse_costs = uncapped_inverse_costs
+        inverse_cost_cap_mask = torch.zeros_like(uncapped_inverse_costs, dtype=torch.bool)
+    else:
+        max_inverse_cost = float(max_inverse_cost)
+        if not math.isfinite(max_inverse_cost) or max_inverse_cost <= 0:
+            raise ValueError(f"max_inverse_cost must be finite and positive, got {max_inverse_cost}")
+        inverse_cost_cap_mask = uncapped_inverse_costs > max_inverse_cost
+        inverse_costs = uncapped_inverse_costs.clamp(max=max_inverse_cost)
+
+    return trajectory_lengths, trajectory_costs, inverse_costs, inverse_cost_cap_mask
+
+
+@register_adv_est(AdvantageEstimator.COST_AWARE_MAXRL)
+def compute_cost_aware_maxrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config=None,
+    cost_reference_tokens: Optional[float] = None,
+    max_inverse_cost: Optional[float] = 4.0,
+    **kwargs,
+):
+    """Compute MaxRL advantages weighted by capped inverse trajectory cost.
+
+    For a prompt group with ``N`` trajectories and reward sum ``K``, the
+    trajectory advantage is ``N * r_i * min(1 / c_i, cap) / K - 1``. Groups
+    with no successful trajectories receive zero advantage.
+    """
+    if config is not None:
+        cost_reference_tokens = config.get("cost_reference_tokens", cost_reference_tokens)
+        max_inverse_cost = config.get("max_inverse_cost", max_inverse_cost)
+    if cost_reference_tokens is None:
+        raise ValueError("cost_reference_tokens is required for cost_aware_maxrl")
+    if index is None:
+        raise ValueError("index is required for cost_aware_maxrl prompt grouping")
+
+    scores = token_level_rewards.sum(dim=-1)
+    if len(index) != scores.shape[0]:
+        raise ValueError(f"index length {len(index)} does not match batch size {scores.shape[0]}")
+
+    _, _, inverse_costs, _ = compute_cost_aware_maxrl_costs(
+        response_mask=response_mask,
+        cost_reference_tokens=cost_reference_tokens,
+        max_inverse_cost=max_inverse_cost,
+    )
+    inverse_costs = inverse_costs.to(device=scores.device, dtype=scores.dtype)
+
+    with torch.no_grad():
+        trajectory_advantages = torch.zeros_like(scores)
+        id2positions = defaultdict(list)
+        for position, prompt_id in enumerate(index):
+            id2positions[prompt_id].append(position)
+
+        for positions in id2positions.values():
+            position_tensor = torch.as_tensor(positions, dtype=torch.long, device=scores.device)
+            group_scores = scores.index_select(0, position_tensor)
+            successful_count = group_scores.sum()
+            if successful_count.item() <= epsilon:
+                continue
+
+            group_inverse_costs = inverse_costs.index_select(0, position_tensor)
+            group_advantages = len(positions) * group_scores * group_inverse_costs / successful_count - 1.0
+            trajectory_advantages.index_copy_(0, position_tensor, group_advantages)
+
+        advantages = trajectory_advantages.unsqueeze(-1) * response_mask
+
+    return advantages, advantages
+
+
+def compute_rao_blackwellized_betas(cost_probabilities: torch.Tensor) -> torch.Tensor:
+    """Compute Rao-Blackwell cost coefficients with leave-one-out DP.
+
+    For each rollout ``i``, this computes
+    ``kappa_i * E[1 / (1 + K_{-i})]``, where ``K_{-i}`` is the sum of
+    independent Bernoulli variables with probabilities ``kappa_j`` for all
+    ``j != i``.
+    """
+    if cost_probabilities.ndim != 1:
+        raise ValueError(f"cost_probabilities must be rank 1, got shape {tuple(cost_probabilities.shape)}")
+    if cost_probabilities.numel() == 0:
+        raise ValueError("cost_probabilities must contain at least one trajectory")
+
+    output_dtype = (
+        cost_probabilities.dtype if cost_probabilities.dtype in (torch.float32, torch.float64) else torch.float32
+    )
+    probabilities = cost_probabilities.detach().to(dtype=torch.float64)
+    if not torch.isfinite(probabilities).all().item():
+        raise ValueError("cost_probabilities must be finite")
+    if torch.any((probabilities < 0) | (probabilities > 1)).item():
+        raise ValueError("cost_probabilities must lie in [0, 1]")
+
+    num_trajectories = probabilities.numel()
+    betas = torch.zeros_like(probabilities)
+    denominators = torch.arange(
+        1,
+        num_trajectories + 1,
+        dtype=probabilities.dtype,
+        device=probabilities.device,
+    )
+
+    for excluded_position in range(num_trajectories):
+        # pmf[k] is P(K_{-i} = k). Start with the empty Bernoulli sum.
+        pmf = torch.ones(1, dtype=probabilities.dtype, device=probabilities.device)
+        for position in range(num_trajectories):
+            if position == excluded_position:
+                continue
+            probability = probabilities[position]
+            next_pmf = torch.zeros(pmf.numel() + 1, dtype=pmf.dtype, device=pmf.device)
+            next_pmf[:-1] += pmf * (1.0 - probability)
+            next_pmf[1:] += pmf * probability
+            pmf = next_pmf
+
+        expected_reciprocal_count = torch.sum(pmf / denominators)
+        betas[excluded_position] = probabilities[excluded_position] * expected_reciprocal_count
+
+    return betas.to(dtype=output_dtype)
+
+
+def compute_rb_cost_probabilities(
+    response_mask: torch.Tensor,
+    cost_max_tokens: float,
+):
+    """Convert response lengths to Bernoulli cost probabilities in [0, 1]."""
+    if response_mask.ndim != 2:
+        raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
+
+    cost_max_tokens = float(cost_max_tokens)
+    if not math.isfinite(cost_max_tokens) or cost_max_tokens <= 0:
+        raise ValueError(f"cost_max_tokens must be finite and positive, got {cost_max_tokens}")
+
+    trajectory_lengths = response_mask.sum(dim=-1).to(dtype=torch.float32)
+    if torch.any(trajectory_lengths > cost_max_tokens).item():
+        raise ValueError("trajectory length cannot exceed cost_max_tokens")
+    cost_probabilities = trajectory_lengths / cost_max_tokens
+    return trajectory_lengths, cost_probabilities
+
+
+@register_adv_est(AdvantageEstimator.RB_COST_AWARE_MAXRL)
+def compute_rb_cost_aware_maxrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config=None,
+    cost_max_tokens: Optional[float] = None,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute success-gated Rao-Blackwellized cost-aware MaxRL advantages.
+
+    A group with ``K > 0`` uses ``N * r_i / K - N * beta_i``. No additional
+    ``-1`` control variate is applied. The entire group receives zero advantage
+    when ``K == 0``.
+    """
+    if config is not None:
+        cost_max_tokens = config.get("rb_cost_max_tokens", cost_max_tokens)
+    if cost_max_tokens is None:
+        raise ValueError("rb_cost_max_tokens is required for rb_cost_aware_maxrl")
+    if index is None:
+        raise ValueError("index is required for rb_cost_aware_maxrl prompt grouping")
+
+    scores = token_level_rewards.sum(dim=-1)
+    if len(index) != scores.shape[0]:
+        raise ValueError(f"index length {len(index)} does not match batch size {scores.shape[0]}")
+
+    trajectory_lengths, cost_probabilities = compute_rb_cost_probabilities(
+        response_mask=response_mask,
+        cost_max_tokens=cost_max_tokens,
+    )
+    cost_probabilities = cost_probabilities.to(device=scores.device)
+
+    with torch.no_grad():
+        trajectory_advantages = torch.zeros_like(scores)
+        trajectory_betas = torch.zeros_like(cost_probabilities)
+        zero_success_groups = []
+        id2positions = defaultdict(list)
+        for position, prompt_id in enumerate(index):
+            id2positions[prompt_id].append(position)
+
+        for positions in id2positions.values():
+            position_tensor = torch.as_tensor(positions, dtype=torch.long, device=scores.device)
+            group_scores = scores.index_select(0, position_tensor)
+            group_cost_probabilities = cost_probabilities.index_select(0, position_tensor)
+            group_betas = compute_rao_blackwellized_betas(group_cost_probabilities)
+            trajectory_betas.index_copy_(0, position_tensor, group_betas)
+
+            successful_count = group_scores.sum()
+            zero_success = successful_count.item() <= epsilon
+            zero_success_groups.append(zero_success)
+            if zero_success:
+                continue
+
+            group_size = len(positions)
+            group_advantages = group_size * group_scores / successful_count - group_size * group_betas.to(
+                dtype=group_scores.dtype
+            )
+            trajectory_advantages.index_copy_(0, position_tensor, group_advantages)
+
+        advantages = trajectory_advantages.unsqueeze(-1) * response_mask
+
+    if return_diagnostics:
+        diagnostics = {
+            "trajectory_lengths": trajectory_lengths,
+            "cost_probabilities": cost_probabilities,
+            "betas": trajectory_betas,
+            "zero_success_groups": torch.tensor(
+                zero_success_groups,
+                dtype=torch.bool,
+                device=scores.device,
+            ),
+        }
+        return advantages, advantages, diagnostics
+    return advantages, advantages
 
 
 @register_adv_est(AdvantageEstimator.GRPO_WITH_FILTERED_SFT)

@@ -180,6 +180,64 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     return metrics
 
 
+def compute_cost_aware_maxrl_metrics(
+    trajectory_lengths: torch.Tensor,
+    trajectory_costs: torch.Tensor,
+    inverse_cost_cap_mask: torch.Tensor,
+) -> Dict[str, float]:
+    """Summarize cost-aware MaxRL trajectory statistics for one training step."""
+    if trajectory_lengths.numel() == 0:
+        raise ValueError("cost-aware MaxRL metrics require at least one trajectory")
+    if (
+        trajectory_lengths.shape != trajectory_costs.shape
+        or trajectory_lengths.shape != inverse_cost_cap_mask.shape
+    ):
+        raise ValueError("trajectory lengths, costs, and cap mask must have matching shapes")
+
+    lengths = trajectory_lengths.detach().float()
+    costs = trajectory_costs.detach().float()
+    cap_mask = inverse_cost_cap_mask.detach().float()
+    return {
+        "cost_aware_maxrl/trajectory_tokens_mean": lengths.mean().item(),
+        "cost_aware_maxrl/trajectory_tokens_max": lengths.max().item(),
+        "cost_aware_maxrl/trajectory_tokens_min": lengths.min().item(),
+        "cost_aware_maxrl/cost_mean": costs.mean().item(),
+        "cost_aware_maxrl/cost_max": costs.max().item(),
+        "cost_aware_maxrl/cost_min": costs.min().item(),
+        "cost_aware_maxrl/cap_ratio": cap_mask.mean().item(),
+    }
+
+
+def compute_rb_cost_aware_maxrl_metrics(
+    trajectory_lengths: torch.Tensor,
+    cost_probabilities: torch.Tensor,
+    betas: torch.Tensor,
+    zero_success_groups: torch.Tensor,
+) -> Dict[str, float]:
+    """Summarize success-gated Rao-Blackwellized MaxRL statistics."""
+    if trajectory_lengths.numel() == 0 or zero_success_groups.numel() == 0:
+        raise ValueError("RB cost-aware MaxRL metrics require trajectories and prompt groups")
+    if trajectory_lengths.shape != cost_probabilities.shape or trajectory_lengths.shape != betas.shape:
+        raise ValueError("trajectory lengths, cost probabilities, and betas must have matching shapes")
+
+    lengths = trajectory_lengths.detach().float()
+    kappas = cost_probabilities.detach().float()
+    beta_values = betas.detach().float()
+    zero_success = zero_success_groups.detach().float()
+    return {
+        "rb_cost_aware_maxrl/trajectory_tokens_mean": lengths.mean().item(),
+        "rb_cost_aware_maxrl/trajectory_tokens_max": lengths.max().item(),
+        "rb_cost_aware_maxrl/trajectory_tokens_min": lengths.min().item(),
+        "rb_cost_aware_maxrl/kappa_mean": kappas.mean().item(),
+        "rb_cost_aware_maxrl/kappa_max": kappas.max().item(),
+        "rb_cost_aware_maxrl/kappa_min": kappas.min().item(),
+        "rb_cost_aware_maxrl/beta_mean": beta_values.mean().item(),
+        "rb_cost_aware_maxrl/beta_max": beta_values.max().item(),
+        "rb_cost_aware_maxrl/beta_min": beta_values.min().item(),
+        "rb_cost_aware_maxrl/zero_success_group_ratio": zero_success.mean().item(),
+    }
+
+
 def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.

@@ -188,6 +188,10 @@ A_i^{\mathrm{MaxRL}}
 In the standard implementation, the entire update is set to zero when
 \(K_r=0\).
 
+This practical gate differs from the unconditional control-variate estimator
+above, which retains coefficient \(-1/N\) when \(K_r=0\). The unbiasedness
+claim for \(A_N-V_N\) applies to that unconditional form.
+
 ---
 
 ## 2. Cost-Aware MaxRL
@@ -504,3 +508,76 @@ A successful rollout is pushed up according to its share of the
 successful samples, while an expensive rollout is pushed down according
 to its Rao–Blackwellized marginal contribution to the finite-\(N\)
 cost objective.
+
+---
+
+## 3. Implemented Success-Gated Variant
+
+The repository implements a deliberate success-gated variant. If a prompt
+group has no correct rollout, its complete gradient is set to zero. Because
+the actor averages the \(N\) trajectory losses, the implementation-scale
+advantage is
+
+\[
+\boxed{
+A_i^{\mathrm{RB-SG}}
+=
+\begin{cases}
+\displaystyle \frac{r_i}{\bar r}-N\beta_i, & K_r>0,\\[0.6em]
+0, & K_r=0.
+\end{cases}
+}
+\]
+
+No additional \(-1\) score-function control variate is used. Gating the cost
+term when \(K_r=0\) intentionally changes the estimator: it no longer remains
+unbiased for \(L_N(p_\theta)-L_N(q_\theta)\), but it avoids rewarding short
+failures before the policy has found a correct trajectory.
+
+For token cost, use
+
+\[
+\kappa_i=\frac{L_i}{L_{\max}}\in[0,1].
+\]
+
+This differs from the inverse-cost variant's \(c_i=L_i/(L_{\max}/2)\), which
+can exceed one and therefore cannot parameterize the Bernoulli variables in
+the Rao–Blackwell construction.
+
+### Dynamic program for \(\beta_i\)
+
+For every excluded rollout \(i\), initialize the leave-one-out
+Poisson-binomial PMF with \(d_0=1\). For each \(j\ne i\), update
+
+\[
+d_k^{\mathrm{new}}
+=(1-\kappa_j)d_k+\kappa_jd_{k-1},
+\]
+
+where missing entries are zero. After processing all \(j\ne i\), compute
+
+\[
+\boxed{
+\beta_i=\kappa_i\sum_{k=0}^{N-1}\frac{d_k}{k+1}.
+}
+\]
+
+This integrates out the auxiliary Bernoulli variables exactly. A useful
+numerical invariant is
+
+\[
+\sum_i\beta_i=1-\prod_i(1-\kappa_i).
+\]
+
+### Training
+
+Launch the five-epoch Qwen3 Math12K experiment with
+
+```bash
+bash qwen3_experiments/run_qwen3_1_7b_math12k_rb_cost_aware.sh
+```
+
+The launcher uses `seq-mean-token-sum`, \(L_{\max}=4096\), W&B, and a separate
+checkpoint directory. Each training step records trajectory-token, \(\kappa_i\),
+and \(\beta_i\) mean/max/min statistics plus
+`rb_cost_aware_maxrl/zero_success_group_ratio`.

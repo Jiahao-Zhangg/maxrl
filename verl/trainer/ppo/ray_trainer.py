@@ -44,7 +44,9 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    compute_cost_aware_maxrl_metrics,
     compute_data_metrics,
+    compute_rb_cost_aware_maxrl_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -286,6 +288,50 @@ def compute_advantage(
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
+    elif adv_estimator == AdvantageEstimator.COST_AWARE_MAXRL:
+        calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = calculation_mask.size(1)
+            calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        cost_reference_tokens = config.get("cost_reference_tokens", None) if config is not None else None
+        max_inverse_cost = config.get("max_inverse_cost", 4.0) if config is not None else 4.0
+        advantages, returns = core_algos.compute_cost_aware_maxrl_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            config=config,
+        )
+        trajectory_lengths, trajectory_costs, _, inverse_cost_cap_mask = core_algos.compute_cost_aware_maxrl_costs(
+            response_mask=calculation_mask,
+            cost_reference_tokens=cost_reference_tokens,
+            max_inverse_cost=max_inverse_cost,
+        )
+        data.meta_info["cost_aware_maxrl_metrics"] = compute_cost_aware_maxrl_metrics(
+            trajectory_lengths=trajectory_lengths,
+            trajectory_costs=trajectory_costs,
+            inverse_cost_cap_mask=inverse_cost_cap_mask,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
+    elif adv_estimator == AdvantageEstimator.RB_COST_AWARE_MAXRL:
+        calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = calculation_mask.size(1)
+            calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        advantages, returns, diagnostics = core_algos.compute_rb_cost_aware_maxrl_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            config=config,
+            return_diagnostics=True,
+        )
+        data.meta_info["rb_cost_aware_maxrl_metrics"] = compute_rb_cost_aware_maxrl_metrics(**diagnostics)
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
     elif adv_estimator == AdvantageEstimator.GRPO_WITH_FILTERED_SFT:
         # Initialize the mask for SFT calculation
         sft_calculation_mask = data.batch["response_mask"]
@@ -444,6 +490,8 @@ class RayPPOTrainer:
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.GRPO_WITH_FILTERED_SFT,
             AdvantageEstimator.MAXRL,
+            AdvantageEstimator.COST_AWARE_MAXRL,
+            AdvantageEstimator.RB_COST_AWARE_MAXRL,
             AdvantageEstimator.PKPO,
             AdvantageEstimator.MACLAURIN,
             AdvantageEstimator.CROSS_FITTED_MACLAURIN,
@@ -1827,6 +1875,12 @@ class RayPPOTrainer:
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
                             config=self.config.algorithm,
                         )
+                        cost_aware_maxrl_metrics = batch.meta_info.pop("cost_aware_maxrl_metrics", None)
+                        if cost_aware_maxrl_metrics is not None:
+                            metrics.update(cost_aware_maxrl_metrics)
+                        rb_cost_aware_maxrl_metrics = batch.meta_info.pop("rb_cost_aware_maxrl_metrics", None)
+                        if rb_cost_aware_maxrl_metrics is not None:
+                            metrics.update(rb_cost_aware_maxrl_metrics)
 
                     # update critic
                     if self.use_critic:

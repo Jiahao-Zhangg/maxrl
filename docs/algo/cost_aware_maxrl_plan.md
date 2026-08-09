@@ -61,8 +61,9 @@ $$
 - \frac{1}{N}\sum_{i=1}^{N}S_i.
 $$
 
-The last term has expectation zero, so it changes variance but not the expected
-gradient. The current implementation in `verl/trainer/ppo/core_algos.py` uses
+The last term has expectation zero only when it is applied unconditionally,
+including to $K=0$ groups. The current implementation instead gates the whole
+centered update when $K=0$, and in `verl/trainer/ppo/core_algos.py` uses
 `(r_i - mean_reward) / (mean_reward + epsilon)` and then masks padding. Its
 `epsilon=1e-6` makes the $K>0$ result negligibly smaller than the exact formula
 and produces zero when every rollout fails.
@@ -117,10 +118,10 @@ G_{\mathrm{cap}} = \frac{1}{K}\sum_{i=1}^{N}r_iw_iS_i,
 $$
 
 when $K>0$, and set every advantage in the group to zero when $K=0$.
-The `-1` term does not change the expected gradient because
-$\mathbb{E}[S_i]=0$, but it supplies the usual MaxRL baseline and reduces
-variance. Broadcast each trajectory's scalar advantage over its valid response
-tokens and keep padding at zero.
+The gated `-1` term follows the repository's practical MaxRL centering
+convention. Because it is omitted when $K=0$, it is not the unconditional
+zero-mean control variate. Broadcast each trajectory's scalar advantage over
+its valid response tokens and keep padding at zero.
 
 Do **not** divide by $\sum_i r_i/c_i$. That would normalize the
 cost-weighted rewards and optimize a different estimator. Do not apply group

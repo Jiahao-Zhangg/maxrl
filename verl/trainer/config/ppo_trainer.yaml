@@ -870,6 +870,15 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
+  # Reference trajectory length used by cost-aware MaxRL; set to max_response_length / 2
+  cost_reference_tokens: null
+
+  # Maximum value of 1 / c_i for cost-aware MaxRL; null disables capping
+  max_inverse_cost: 4.0
+
+  # Maximum trajectory cost used to map RB cost-aware MaxRL lengths into [0, 1]
+  rb_cost_max_tokens: null
+
   # Pass@K value for PKPO advantage estimator
   # Used when adv_estimator is "pkpo"
   pass_k: 1
