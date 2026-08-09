@@ -15,6 +15,7 @@ MAXRL_RAY_DIR=${MAXRL_RAY_DIR:-${MAXRL_OUTPUT_DIR}/ray}
 MAXRL_SKIP_ENV_SETUP=${MAXRL_SKIP_ENV_SETUP:-0}
 MAXRL_REFRESH_DATA=${MAXRL_REFRESH_DATA:-0}
 MAXRL_INSTALL_JOBS=${MAXRL_INSTALL_JOBS:-4}
+MAXRL_REQUIREMENTS_FILE=${MAXRL_REQUIREMENTS_FILE:-}
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
@@ -37,6 +38,14 @@ activate_environment() {
 }
 
 install_environment() {
+    if [[ -n "${MAXRL_REQUIREMENTS_FILE}" ]]; then
+        [[ -f "${MAXRL_REQUIREMENTS_FILE}" ]] || \
+            die "requirements file not found: ${MAXRL_REQUIREMENTS_FILE}"
+        python -m pip install --no-cache-dir -r "${MAXRL_REQUIREMENTS_FILE}"
+        python -m pip install --no-deps -e "${REPO_ROOT}"
+        return
+    fi
+
     python -m pip install \
         pip==25.0.1 setuptools==75.8.0 wheel==0.45.1
     python -m pip install --no-cache-dir \
