@@ -1,4 +1,4 @@
-# Cost-Aware MaxRL Implementation Plan
+# Cost-Aware MaxRL
 
 ## Standard MaxRL: Advantage and Gradient
 
@@ -100,19 +100,20 @@ This variant favors correct, shorter trajectories. Scaling by
 $L_{\mathrm{ref}}$ fixes the overall gradient scale but does not change the
 relative preference between two response lengths.
 
-## Advantage
+## Cost-Aware Advantage
 
-The actor averages losses over the $N$ trajectories, so use the raw
-trajectory advantage
-
-$$
-A_i^{\mathrm{raw}} = \frac{N}{K}\frac{r_i}{c_i}.
-$$
-
-Use the MaxRL control variate in practice:
+The implemented run caps inverse cost at $w_{\max}=4$. Define
 
 $$
-\boxed{A_i = \frac{N r_i L_{\max}}{2K L_i} - 1}
+w_i = \min\left(\frac{1}{c_i}, w_{\max}\right).
+$$
+
+The capped target and its MaxRL control-variate advantage are
+
+$$
+G_{\mathrm{cap}} = \frac{1}{K}\sum_{i=1}^{N}r_iw_iS_i,
+\qquad
+\boxed{A_i = \frac{N}{K}r_iw_i - 1}.
 $$
 
 when $K>0$, and set every advantage in the group to zero when $K=0$.
@@ -126,56 +127,70 @@ cost-weighted rewards and optimize a different estimator. Do not apply group
 standard-deviation normalization either.
 
 For example, with $N=16$, $K=4$, and $L_{\max}=4096$, a correct
-1,024-token response has $c_i=0.5$ and $A_i=7$; an incorrect response has
-$A_i=-1$.
+1,024-token response has $c_i=0.5$, $w_i=2$, and $A_i=7$; an incorrect
+response has $A_i=-1$.
 
 ## Stability Policy
 
-Inverse length can be very large for unusually short outputs. Implement an
-optional cap without silently enabling it:
+Inverse length can be very large for unusually short outputs. The estimator
+therefore computes
 
 ```text
 inverse_cost = (cost_reference_tokens / response_length).clamp(max=max_inverse_cost)
 ```
 
-The exact estimator uses no cap. For the first training comparison, also test
-`max_inverse_cost=4.0`. Log the capped fraction because a cap intentionally
-changes the objective. Clamp response length to at least one before division,
-and detach lengths, rewards, and advantages from autograd.
+The training launcher sets `max_inverse_cost=4.0`. With
+`cost_reference_tokens=2048`, the cap affects trajectories shorter than 512
+tokens; a trajectory of exactly 512 tokens has inverse cost 4 and is not
+counted as capped. The implementation clamps response length to at least one
+before division and computes rewards, lengths, costs, and advantages without
+autograd. Setting `algorithm.max_inverse_cost=null` restores the uncapped
+estimator.
 
-## Repository Changes
+## Configuration and Monitoring
 
-1. Add `COST_AWARE_MAXRL = "cost_aware_maxrl"` and a registered estimator in
-   `verl/trainer/ppo/core_algos.py`. Read these settings from the algorithm
-   config:
+The estimator is registered as `cost_aware_maxrl` in
+`verl/trainer/ppo/core_algos.py`. The Qwen3 Math12K run uses:
 
-   ```yaml
-   algorithm:
-     adv_estimator: cost_aware_maxrl
-     cost_reference_tokens: 2048  # data.max_response_length / 2
-     max_inverse_cost: null       # exact estimator; use 4.0 for capped ablation
-   ```
+```yaml
+algorithm:
+  adv_estimator: cost_aware_maxrl
+  cost_reference_tokens: 2048  # data.max_response_length / 2
+  max_inverse_cost: 4.0
+actor_rollout_ref:
+  actor:
+    loss_agg_mode: seq-mean-token-sum
+```
 
-2. Use `actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum`. This makes
-   the actor's sequence-average gradient match $G$. The current `token-mean`
-   mode introduces an additional batch token-count scale.
-3. Add a separate Qwen3 Math12K launcher so the running MaxRL experiment and
-   its checkpoints remain unchanged.
-4. Log mean response length, mean successful-response length, inverse cost,
-   cap fraction, zero-success group fraction, and advantage min/mean/max.
+`seq-mean-token-sum` makes the actor's sequence-average gradient match
+$G_{\mathrm{cap}}$. The separate launcher leaves the original experiment and
+its checkpoints unchanged:
+
+```bash
+bash qwen3_experiments/run_qwen3_1_7b_math12k_cost_aware.sh
+```
+
+The normal `console` and `wandb` loggers record these metrics every global
+training step:
+
+- `cost_aware_maxrl/trajectory_tokens_{mean,max,min}`
+- `cost_aware_maxrl/cost_{mean,max,min}` for the uncapped $c_i$
+- `cost_aware_maxrl/cap_ratio`, the fraction of trajectories whose inverse
+  cost was reduced by the cap
 
 ## Tests and Experiment
 
-Add CPU tests in `tests/trainer/ppo/test_core_algos_on_cpu.py` for mixed
-lengths, $K=0$, all-success groups, multiple prompt groups, padding, and the
-optional cap. Numerically verify that
+CPU tests in `tests/trainer/ppo/test_cost_aware_maxrl_on_cpu.py` cover mixed
+lengths, $K=0$, all-success groups, multiple prompt groups, padding, capped and
+uncapped costs, metrics, invalid configuration, and trainer dispatch. The core
+identity is
 
 $$
 \frac{1}{N}\sum_i (A_i+1)S_i
-= \frac{1}{K}\sum_i \frac{r_i}{c_i}S_i.
+= \frac{1}{K}\sum_i r_iw_iS_i.
 $$
 
-Then compare the existing MaxRL run, exact cost-aware MaxRL, and the capped
-variant with the same model, data, seed, rollout count, and five epochs. Report
-validation accuracy together with response length and correct answers per
-generated token; accuracy alone would hide the cost tradeoff.
+Compare the existing MaxRL run with capped cost-aware MaxRL using the same
+model, data, seed, rollout count, and five epochs. Report validation accuracy
+together with response length and correct answers per generated token;
+accuracy alone would hide the cost tradeoff.
