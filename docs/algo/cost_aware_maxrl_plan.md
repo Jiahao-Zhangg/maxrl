@@ -1,6 +1,83 @@
 # Cost-Aware MaxRL Implementation Plan
 
-## Goal
+## Standard MaxRL: Advantage and Gradient
+
+For one prompt $x$, let the policy's success probability be
+
+$$
+p_\theta(x) = \mathbb{E}_{y\sim\pi_\theta(\cdot\mid x)}[r(y)],
+\qquad
+S_i = \nabla_\theta\log\pi_\theta(y_i\mid x),
+$$
+
+where $r_i\in\{0,1\}$. With $N$ rollouts, MaxRL optimizes the order-$N$
+truncation of the log-likelihood expansion:
+
+$$
+J_{\mathrm{MaxRL}}^{(N)}(x)
+= -\sum_{k=1}^{N}\frac{(1-p_\theta(x))^k}{k}.
+$$
+
+Its population gradient is
+
+$$
+\nabla_\theta J_{\mathrm{MaxRL}}^{(N)}(x)
+= \frac{1-(1-p)^N}{p}\,\nabla_\theta p
+= \frac{1-(1-p)^N}{p}\,\mathbb{E}[rS].
+$$
+
+For sampled rewards, let $K=\sum_i r_i$ and
+$\bar r=K/N$. The practical estimator is
+
+$$
+\widehat g_N(x) =
+\begin{cases}
+\displaystyle\frac{1}{K}\sum_{i=1}^{N}r_iS_i, & K>0,\\
+0, & K=0.
+\end{cases}
+$$
+
+This is unbiased for the gradient above: a batch contains a success with
+probability $1-(1-p)^N$, while the conditional mean score of successful
+trajectories is $\mathbb{E}[S\mid r=1]=\mathbb{E}[rS]/p$.
+
+To express this estimator as a sequence-averaged PPO loss, MaxRL uses the
+zero-mean score-function control variate
+$V_N=N^{-1}\sum_i S_i$. The resulting scalar trajectory advantage is
+
+$$
+\boxed{A_i^{\mathrm{MaxRL}}
+= \frac{r_i-\bar r}{\bar r}
+= \frac{N r_i}{K}-1}, \qquad K>0,
+$$
+
+with all advantages set to zero when $K=0$. Thus a successful trajectory has
+advantage $N/K-1$, while a failed trajectory has advantage $-1$. Broadcasting
+this scalar across its response tokens gives
+
+$$
+\frac{1}{N}\sum_{i=1}^{N}A_i^{\mathrm{MaxRL}}S_i
+= \frac{1}{K}\sum_{i=1}^{N}r_iS_i
+- \frac{1}{N}\sum_{i=1}^{N}S_i.
+$$
+
+The last term has expectation zero, so it changes variance but not the expected
+gradient. The current implementation in `verl/trainer/ppo/core_algos.py` uses
+`(r_i - mean_reward) / (mean_reward + epsilon)` and then masks padding. Its
+`epsilon=1e-6` makes the $K>0$ result negligibly smaller than the exact formula
+and produces zero when every rollout fails.
+
+With `loss_agg_mode=seq-mean-token-sum`, each $S_i$ is the sum of token score
+functions and the equation above is matched directly. For a minibatch of $B$
+trajectories, the current `token-mean` mode instead multiplies that gradient by
+$B/\sum_i L_i$. This preserves the fixed-minibatch direction but makes its
+scale depend on generated lengths.
+
+See the [MaxRL paper](https://arxiv.org/abs/2602.02710) and
+[official project explanation](https://zanette-labs.github.io/MaxRL/) for the
+objective and unbiased-estimator derivation.
+
+## Cost-Aware Goal
 
 For each prompt, sample $N$ trajectories. Let $r_i \in \{0,1\}$ be the math
 grader reward, $L_i$ the number of generated tokens (from
