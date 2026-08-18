@@ -126,6 +126,7 @@ class AdvantageEstimator(str, Enum):
     MAXRL = "maxrl"
     COST_AWARE_MAXRL = "cost_aware_maxrl"
     RB_COST_AWARE_MAXRL = "rb_cost_aware_maxrl"
+    FIXED_N_RB_COST_AWARE_MARGINRL = "fixed_n_rb_cost_aware_marginrl"
     PKPO = "pkpo"
     MACLAURIN = "maclaurin"
     MACLAURIN_BASELINE = "maclaurin_baseline"
@@ -672,6 +673,150 @@ def compute_rb_cost_aware_maxrl_outcome_advantage(
                 device=scores.device,
             ),
         }
+        return advantages, advantages, diagnostics
+    return advantages, advantages
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL)
+def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute fixed-rollout Rao--Blackwellized cost-aware MarginRL advantages.
+
+    For each prompt group, let ``M`` be its number of successful trajectories,
+    ``c_i`` its response-token costs, and ``q_hat = M / sum_i c_i`` the detached
+    same-group rate estimate. The raw trajectory coefficient is
+
+    ``(1 - q_hat * c_i) / M`` for a success and
+    ``-q_hat * c_i / (M + 1)`` for a failure.
+
+    The actor's ``seq-mean-token-sum`` aggregation averages over trajectories,
+    whereas the estimator sums over the fixed rollout group. We therefore
+    multiply raw coefficients by the group size before broadcasting them over
+    response tokens. This changes only the framework normalization, not the
+    per-prompt estimator. An all-failure group has ``q_hat == 0`` and receives
+    zero advantage.
+    """
+    if response_mask.ndim != 2:
+        raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
+    if token_level_rewards.shape != response_mask.shape:
+        raise ValueError(
+            "token_level_rewards and response_mask must have matching shapes, "
+            f"got {tuple(token_level_rewards.shape)} and {tuple(response_mask.shape)}"
+        )
+    if trajectory_cost_mask is None:
+        trajectory_cost_mask = response_mask
+    if trajectory_cost_mask.shape != response_mask.shape:
+        raise ValueError(
+            "trajectory_cost_mask and response_mask must have matching shapes, "
+            f"got {tuple(trajectory_cost_mask.shape)} and {tuple(response_mask.shape)}"
+        )
+    if index is None:
+        raise ValueError("index is required for fixed_n_rb_cost_aware_marginrl prompt grouping")
+    if len(index) != token_level_rewards.shape[0]:
+        raise ValueError(
+            f"index length {len(index)} does not match batch size {token_level_rewards.shape[0]}"
+        )
+    if expected_group_size is not None:
+        expected_group_size = int(expected_group_size)
+        if expected_group_size <= 0:
+            raise ValueError(f"expected_group_size must be positive, got {expected_group_size}")
+
+    scores = token_level_rewards.sum(dim=-1).detach().to(dtype=torch.float32)
+    trajectory_costs = trajectory_cost_mask.sum(dim=-1).detach().to(dtype=torch.float32)
+    if not torch.isfinite(trajectory_costs).all().item() or torch.any(trajectory_costs <= 0).item():
+        raise ValueError("fixed-N trajectory costs must be finite and strictly positive")
+
+    is_zero = torch.isclose(scores, torch.zeros_like(scores), rtol=0.0, atol=1e-6)
+    is_one = torch.isclose(scores, torch.ones_like(scores), rtol=0.0, atol=1e-6)
+    if not torch.all(is_zero | is_one).item():
+        invalid_scores = scores[~(is_zero | is_one)][:8].cpu().tolist()
+        raise ValueError(
+            "fixed_n_rb_cost_aware_marginrl requires binary trajectory rewards; "
+            f"found values such as {invalid_scores}"
+        )
+    binary_rewards = is_one.to(dtype=torch.float32)
+
+    with torch.no_grad():
+        id2positions = defaultdict(list)
+        for position, prompt_id in enumerate(index):
+            id2positions[prompt_id].append(position)
+        if not id2positions:
+            raise ValueError("fixed_n_rb_cost_aware_marginrl requires at least one prompt group")
+
+        observed_group_sizes = {len(positions) for positions in id2positions.values()}
+        if len(observed_group_sizes) != 1:
+            raise ValueError(
+                "fixed_n_rb_cost_aware_marginrl requires one fixed rollout count per prompt; "
+                f"found group sizes {sorted(observed_group_sizes)}"
+            )
+        observed_group_size = next(iter(observed_group_sizes))
+        if expected_group_size is not None and observed_group_size != expected_group_size:
+            raise ValueError(
+                "fixed_n_rb_cost_aware_marginrl rollout count mismatch: "
+                f"expected {expected_group_size}, found {observed_group_size}"
+            )
+
+        raw_trajectory_advantages = torch.zeros_like(scores)
+        optimizer_trajectory_advantages = torch.zeros_like(scores)
+        group_q_hats = []
+        group_success_counts = []
+        group_total_costs = []
+        group_cost_means = []
+        group_cost_stds = []
+        group_accuracies = []
+
+        for positions in id2positions.values():
+            position_tensor = torch.as_tensor(positions, dtype=torch.long, device=scores.device)
+            group_rewards = binary_rewards.index_select(0, position_tensor)
+            group_costs = trajectory_costs.index_select(0, position_tensor)
+            group_size = len(positions)
+            success_count = group_rewards.sum()
+            total_cost = group_costs.sum()
+            q_hat = (success_count / total_cost).detach()
+            q_cost = q_hat * group_costs
+
+            # torch.where evaluates both branches, so use a safe denominator
+            # even though the success branch is inactive when M == 0.
+            safe_success_count = success_count.clamp_min(1.0)
+            success_advantages = (1.0 - q_cost) / safe_success_count
+            failure_advantages = -q_cost / (success_count + 1.0)
+            group_raw_advantages = torch.where(
+                group_rewards.to(dtype=torch.bool),
+                success_advantages,
+                failure_advantages,
+            )
+            group_optimizer_advantages = group_raw_advantages * group_size
+
+            raw_trajectory_advantages.index_copy_(0, position_tensor, group_raw_advantages)
+            optimizer_trajectory_advantages.index_copy_(0, position_tensor, group_optimizer_advantages)
+            group_q_hats.append(q_hat)
+            group_success_counts.append(success_count)
+            group_total_costs.append(total_cost)
+            group_cost_means.append(group_costs.mean())
+            group_cost_stds.append(group_costs.std(unbiased=False))
+            group_accuracies.append(success_count / group_size)
+
+        advantages = optimizer_trajectory_advantages.unsqueeze(-1) * response_mask
+        diagnostics = {
+            "trajectory_costs": trajectory_costs,
+            "raw_trajectory_advantages": raw_trajectory_advantages,
+            "optimizer_trajectory_advantages": optimizer_trajectory_advantages,
+            "group_q_hats": torch.stack(group_q_hats),
+            "group_success_counts": torch.stack(group_success_counts),
+            "group_total_costs": torch.stack(group_total_costs),
+            "group_cost_means": torch.stack(group_cost_means),
+            "group_cost_stds": torch.stack(group_cost_stds),
+            "group_accuracies": torch.stack(group_accuracies),
+        }
+
+    if return_diagnostics:
         return advantages, advantages, diagnostics
     return advantages, advantages
 

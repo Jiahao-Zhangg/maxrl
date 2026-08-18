@@ -46,6 +46,7 @@ from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_cost_aware_maxrl_metrics,
     compute_data_metrics,
+    compute_fixed_n_rb_cost_aware_marginrl_metrics,
     compute_rb_cost_aware_maxrl_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -332,6 +333,29 @@ def compute_advantage(
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
+    elif adv_estimator == AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL:
+        calculation_mask = data.batch["response_mask"]
+        trajectory_cost_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = calculation_mask.size(1)
+            calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        advantages, returns, diagnostics = (
+            core_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+                token_level_rewards=data.batch["token_level_rewards"],
+                response_mask=calculation_mask,
+                trajectory_cost_mask=trajectory_cost_mask,
+                index=data.non_tensor_batch["uid"],
+                expected_group_size=num_repeat,
+                return_diagnostics=True,
+            )
+        )
+        data.meta_info["fixed_n_rb_marginrl_metrics"] = (
+            compute_fixed_n_rb_cost_aware_marginrl_metrics(**diagnostics)
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
     elif adv_estimator == AdvantageEstimator.GRPO_WITH_FILTERED_SFT:
         # Initialize the mask for SFT calculation
         sft_calculation_mask = data.batch["response_mask"]
@@ -492,6 +516,7 @@ class RayPPOTrainer:
             AdvantageEstimator.MAXRL,
             AdvantageEstimator.COST_AWARE_MAXRL,
             AdvantageEstimator.RB_COST_AWARE_MAXRL,
+            AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
             AdvantageEstimator.PKPO,
             AdvantageEstimator.MACLAURIN,
             AdvantageEstimator.CROSS_FITTED_MACLAURIN,
@@ -1607,6 +1632,28 @@ class RayPPOTrainer:
         metrics.update(global_balance_stats)
 
     def fit(self):
+        """Run training and deterministically finalize experiment tracking."""
+        try:
+            self._run_training_loop()
+        except BaseException:
+            try:
+                self._finish_tracking(exit_code=1)
+            except Exception as error:
+                print(f"Failed to finalize experiment tracking after a training error: {error}")
+            raise
+        else:
+            self._finish_tracking(exit_code=0)
+
+    def _finish_tracking(self, exit_code: int) -> None:
+        tracking = getattr(self, "_tracking", None)
+        if tracking is None:
+            return
+        try:
+            tracking.finish(exit_code=exit_code)
+        finally:
+            self._tracking = None
+
+    def _run_training_loop(self):
         """
         The training loop of PPO.
         The driver process only need to call the compute functions of the worker group through RPC
@@ -1639,6 +1686,7 @@ class RayPPOTrainer:
             previous_run_id=self.wandb_id,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        self._tracking = logger
 
         if self.wandb_id is None:
             self.wandb_id = logger.wandb_id
@@ -1881,6 +1929,9 @@ class RayPPOTrainer:
                         rb_cost_aware_maxrl_metrics = batch.meta_info.pop("rb_cost_aware_maxrl_metrics", None)
                         if rb_cost_aware_maxrl_metrics is not None:
                             metrics.update(rb_cost_aware_maxrl_metrics)
+                        fixed_n_rb_marginrl_metrics = batch.meta_info.pop("fixed_n_rb_marginrl_metrics", None)
+                        if fixed_n_rb_marginrl_metrics is not None:
+                            metrics.update(fixed_n_rb_marginrl_metrics)
 
                     # update critic
                     if self.use_critic:

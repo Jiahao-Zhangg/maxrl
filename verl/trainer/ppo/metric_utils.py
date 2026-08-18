@@ -238,6 +238,92 @@ def compute_rb_cost_aware_maxrl_metrics(
     }
 
 
+def compute_fixed_n_rb_cost_aware_marginrl_metrics(
+    trajectory_costs: torch.Tensor,
+    raw_trajectory_advantages: torch.Tensor,
+    optimizer_trajectory_advantages: torch.Tensor,
+    group_q_hats: torch.Tensor,
+    group_success_counts: torch.Tensor,
+    group_total_costs: torch.Tensor,
+    group_cost_means: torch.Tensor,
+    group_cost_stds: torch.Tensor,
+    group_accuracies: torch.Tensor,
+) -> Dict[str, float]:
+    """Summarize fixed-N RB cost-aware MarginRL statistics for W&B."""
+    trajectory_tensors = (
+        trajectory_costs,
+        raw_trajectory_advantages,
+        optimizer_trajectory_advantages,
+    )
+    group_tensors = (
+        group_q_hats,
+        group_success_counts,
+        group_total_costs,
+        group_cost_means,
+        group_cost_stds,
+        group_accuracies,
+    )
+    if any(tensor.numel() == 0 for tensor in (*trajectory_tensors, *group_tensors)):
+        raise ValueError("fixed-N RB MarginRL metrics require trajectories and prompt groups")
+    if any(tensor.shape != trajectory_costs.shape for tensor in trajectory_tensors[1:]):
+        raise ValueError("fixed-N RB MarginRL trajectory diagnostics must have matching shapes")
+    if any(tensor.shape != group_q_hats.shape for tensor in group_tensors[1:]):
+        raise ValueError("fixed-N RB MarginRL group diagnostics must have matching shapes")
+
+    costs = trajectory_costs.detach().float()
+    raw_advantages = raw_trajectory_advantages.detach().float()
+    optimizer_advantages = optimizer_trajectory_advantages.detach().float()
+    q_hats = group_q_hats.detach().float()
+    success_counts = group_success_counts.detach().float()
+    total_costs = group_total_costs.detach().float()
+    cost_means = group_cost_means.detach().float()
+    cost_stds = group_cost_stds.detach().float()
+    accuracies = group_accuracies.detach().float()
+
+    def population_std(values: torch.Tensor) -> float:
+        return values.std(unbiased=False).item()
+
+    return {
+        # Applicable trajectory-length metrics retained from prior variants.
+        "fixed_n_rb_marginrl/trajectory_tokens_mean": costs.mean().item(),
+        "fixed_n_rb_marginrl/trajectory_tokens_max": costs.max().item(),
+        "fixed_n_rb_marginrl/trajectory_tokens_min": costs.min().item(),
+        # Requested detached rate and sufficient statistics, summarized over prompts.
+        "fixed_n_rb_marginrl/q_hat_mean": q_hats.mean().item(),
+        "fixed_n_rb_marginrl/q_hat_std": population_std(q_hats),
+        "fixed_n_rb_marginrl/q_hat_max": q_hats.max().item(),
+        "fixed_n_rb_marginrl/q_hat_min": q_hats.min().item(),
+        "fixed_n_rb_marginrl/M_t_mean": success_counts.mean().item(),
+        "fixed_n_rb_marginrl/M_t_std": population_std(success_counts),
+        "fixed_n_rb_marginrl/M_t_max": success_counts.max().item(),
+        "fixed_n_rb_marginrl/M_t_min": success_counts.min().item(),
+        "fixed_n_rb_marginrl/total_cost_mean": total_costs.mean().item(),
+        "fixed_n_rb_marginrl/total_cost_std": population_std(total_costs),
+        "fixed_n_rb_marginrl/total_cost_max": total_costs.max().item(),
+        "fixed_n_rb_marginrl/total_cost_min": total_costs.min().item(),
+        "fixed_n_rb_marginrl/cost_mean": costs.mean().item(),
+        "fixed_n_rb_marginrl/cost_std": population_std(costs),
+        "fixed_n_rb_marginrl/cost_max": costs.max().item(),
+        "fixed_n_rb_marginrl/cost_min": costs.min().item(),
+        "fixed_n_rb_marginrl/group_cost_mean_std": population_std(cost_means),
+        "fixed_n_rb_marginrl/group_cost_std_mean": cost_stds.mean().item(),
+        "fixed_n_rb_marginrl/group_cost_std_std": population_std(cost_stds),
+        "fixed_n_rb_marginrl/accuracy_mean": accuracies.mean().item(),
+        "fixed_n_rb_marginrl/accuracy_std": population_std(accuracies),
+        "fixed_n_rb_marginrl/accuracy_max": accuracies.max().item(),
+        "fixed_n_rb_marginrl/accuracy_min": accuracies.min().item(),
+        "fixed_n_rb_marginrl/zero_success_group_ratio": (success_counts == 0).float().mean().item(),
+        "fixed_n_rb_marginrl/raw_advantage_mean": raw_advantages.mean().item(),
+        "fixed_n_rb_marginrl/raw_advantage_std": population_std(raw_advantages),
+        "fixed_n_rb_marginrl/raw_advantage_max": raw_advantages.max().item(),
+        "fixed_n_rb_marginrl/raw_advantage_min": raw_advantages.min().item(),
+        "fixed_n_rb_marginrl/optimizer_advantage_mean": optimizer_advantages.mean().item(),
+        "fixed_n_rb_marginrl/optimizer_advantage_std": population_std(optimizer_advantages),
+        "fixed_n_rb_marginrl/optimizer_advantage_max": optimizer_advantages.max().item(),
+        "fixed_n_rb_marginrl/optimizer_advantage_min": optimizer_advantages.min().item(),
+    }
+
+
 def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.

@@ -425,6 +425,12 @@ elif [[ "${ADVANTAGE_ESTIMATOR}" == "rb_cost_aware_maxrl" ]]; then
     RB_COST_MAX_TOKENS=${MAXRL_RB_COST_MAX_TOKENS:-${MAX_RESPONSE_LENGTH}}
     ALGORITHM_OVERRIDES+=("algorithm.rb_cost_max_tokens=${RB_COST_MAX_TOKENS}")
     echo "RB cost-aware MaxRL: cost_max_tokens=${RB_COST_MAX_TOKENS}, zero-success update=zero"
+elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl" ]]; then
+    if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: fixed_n_rb_cost_aware_marginrl requires seq-mean-token-sum loss aggregation" >&2
+        exit 1
+    fi
+    echo "Fixed-N RB cost-aware MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, q_hat=M/sum(tokens), zero-success update=zero"
 fi
 
 echo "Training ${MODEL_NAME} with hiyouga/math12k for ${TOTAL_EPOCHS} epochs"
