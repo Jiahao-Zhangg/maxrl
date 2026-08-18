@@ -7,15 +7,68 @@ export PYTHONNOUSERSITE=1
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd)
+MACHINE_ARCH=$(uname -m)
 
 MAXRL_ENV_NAME=${MAXRL_ENV_NAME:-maxrl}
 MAXRL_DATA_DIR=${MAXRL_DATA_DIR:-${REPO_ROOT}/data}
 MAXRL_OUTPUT_DIR=${MAXRL_OUTPUT_DIR:-${REPO_ROOT}/outputs}
 MAXRL_RAY_DIR=${MAXRL_RAY_DIR:-${MAXRL_OUTPUT_DIR}/ray}
 MAXRL_SKIP_ENV_SETUP=${MAXRL_SKIP_ENV_SETUP:-0}
+MAXRL_ENV_ONLY=${MAXRL_ENV_ONLY:-0}
 MAXRL_REFRESH_DATA=${MAXRL_REFRESH_DATA:-0}
-MAXRL_INSTALL_JOBS=${MAXRL_INSTALL_JOBS:-4}
+MAXRL_INSTALL_JOBS=${MAXRL_INSTALL_JOBS:-}
+MAXRL_NVCC_THREADS=${MAXRL_NVCC_THREADS:-}
+MAXRL_CMAKE_BUILD_TYPE=${MAXRL_CMAKE_BUILD_TYPE:-Release}
+MAXRL_HOST_CC=${MAXRL_HOST_CC:-gcc}
+MAXRL_HOST_CXX=${MAXRL_HOST_CXX:-g++}
+MAXRL_CUDA_COMPILER_LAUNCHER=${MAXRL_CUDA_COMPILER_LAUNCHER:-}
 MAXRL_REQUIREMENTS_FILE=${MAXRL_REQUIREMENTS_FILE:-}
+MAXRL_PYTORCH_REQUIREMENTS_FILE=${MAXRL_PYTORCH_REQUIREMENTS_FILE:-}
+MAXRL_BOOTSTRAP_REQUIREMENTS_FILE=${MAXRL_BOOTSTRAP_REQUIREMENTS_FILE:-}
+MAXRL_SOURCE_REQUIREMENTS_FILE=${MAXRL_SOURCE_REQUIREMENTS_FILE:-}
+MAXRL_EXPECTED_VLLM_VERSION=${MAXRL_EXPECTED_VLLM_VERSION:-0.8.4}
+MAXRL_EXPECTED_VLLM_LOCAL_VERSION=${MAXRL_EXPECTED_VLLM_LOCAL_VERSION:-}
+
+case "${MACHINE_ARCH}" in
+    aarch64|arm64)
+        MAXRL_INSTALL_JOBS=${MAXRL_INSTALL_JOBS:-1}
+        MAXRL_NVCC_THREADS=${MAXRL_NVCC_THREADS:-1}
+        MAXRL_EXPECTED_TORCH_VERSION=${MAXRL_EXPECTED_TORCH_VERSION:-2.6.0+cu126}
+        MAXRL_EXPECTED_TORCH_CUDA=${MAXRL_EXPECTED_TORCH_CUDA:-12.6}
+        MAXRL_EXPECTED_VLLM_LOCAL_VERSION=${MAXRL_EXPECTED_VLLM_LOCAL_VERSION:-cu126}
+        MAXRL_CUDA_ARCH_LIST=${MAXRL_CUDA_ARCH_LIST:-9.0}
+        MAXRL_FLASH_ATTN_CUDA_ARCHS=${MAXRL_FLASH_ATTN_CUDA_ARCHS:-90}
+        MAXRL_CUDA_HOME=${MAXRL_CUDA_HOME:-/sw/user/cudatoolkits/installs/cuda-12.6.1}
+        MAXRL_CUDA_COMPILER_LAUNCHER=${MAXRL_CUDA_COMPILER_LAUNCHER:-${SCRIPT_DIR}/cuda126_aarch64_compiler_launcher.sh}
+        if [[ -z "${MAXRL_REQUIREMENTS_FILE}" ]]; then
+            MAXRL_REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements_qwen3_maxrl_cu126_aarch64.txt"
+            MAXRL_PYTORCH_REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements_qwen3_maxrl_cu126_aarch64_pytorch.txt"
+            MAXRL_BOOTSTRAP_REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements_qwen3_maxrl_cu126_aarch64_bootstrap.txt"
+            MAXRL_SOURCE_REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements_qwen3_maxrl_cu126_aarch64_sources.txt"
+        fi
+        ;;
+    x86_64)
+        MAXRL_INSTALL_JOBS=${MAXRL_INSTALL_JOBS:-4}
+        MAXRL_NVCC_THREADS=${MAXRL_NVCC_THREADS:-2}
+        MAXRL_EXPECTED_TORCH_VERSION=${MAXRL_EXPECTED_TORCH_VERSION:-2.6.0+cu124}
+        MAXRL_EXPECTED_TORCH_CUDA=${MAXRL_EXPECTED_TORCH_CUDA:-12.4}
+        MAXRL_CUDA_ARCH_LIST=${MAXRL_CUDA_ARCH_LIST:-}
+        MAXRL_FLASH_ATTN_CUDA_ARCHS=${MAXRL_FLASH_ATTN_CUDA_ARCHS:-}
+        MAXRL_CUDA_HOME=${MAXRL_CUDA_HOME:-${CUDA_HOME:-}}
+        ;;
+    *)
+        MAXRL_INSTALL_JOBS=${MAXRL_INSTALL_JOBS:-4}
+        MAXRL_NVCC_THREADS=${MAXRL_NVCC_THREADS:-2}
+        MAXRL_EXPECTED_TORCH_VERSION=${MAXRL_EXPECTED_TORCH_VERSION:-2.6.0}
+        MAXRL_EXPECTED_TORCH_CUDA=${MAXRL_EXPECTED_TORCH_CUDA:-}
+        MAXRL_CUDA_ARCH_LIST=${MAXRL_CUDA_ARCH_LIST:-}
+        MAXRL_FLASH_ATTN_CUDA_ARCHS=${MAXRL_FLASH_ATTN_CUDA_ARCHS:-}
+        MAXRL_CUDA_HOME=${MAXRL_CUDA_HOME:-${CUDA_HOME:-}}
+        ;;
+esac
+
+export MAXRL_EXPECTED_TORCH_VERSION MAXRL_EXPECTED_TORCH_CUDA
+export MAXRL_EXPECTED_VLLM_VERSION MAXRL_EXPECTED_VLLM_LOCAL_VERSION
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
@@ -23,6 +76,109 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 die() {
     echo "error: $*" >&2
     exit 1
+}
+
+without_other_cuda_toolkits() {
+    local value=$1
+    local entry
+    local filtered=
+    local -a entries=()
+    IFS=: read -r -a entries <<< "${value}"
+    for entry in "${entries[@]}"; do
+        [[ -n "${entry}" ]] || continue
+        if [[ "${entry}" != "${MAXRL_CUDA_HOME}"* ]] && \
+            [[ "${entry}" == */cuda/* || \
+               "${entry}" == */cuda-*/* || \
+               "${entry}" == */math_libs/* ]]; then
+            continue
+        fi
+        filtered="${filtered}${filtered:+:}${entry}"
+    done
+    printf '%s' "${filtered}"
+}
+
+configure_cuda_source_build() {
+    [[ -x "${MAXRL_CUDA_HOME}/bin/nvcc" ]] || \
+        die "CUDA compiler not found: ${MAXRL_CUDA_HOME}/bin/nvcc"
+    local nvcc_version
+    nvcc_version=$("${MAXRL_CUDA_HOME}/bin/nvcc" --version)
+    [[ "${nvcc_version}" == *"release ${MAXRL_EXPECTED_TORCH_CUDA}"* ]] || \
+        die "CUDA ${MAXRL_EXPECTED_TORCH_CUDA} compiler required under ${MAXRL_CUDA_HOME}"
+
+    export CUDA_HOME="${MAXRL_CUDA_HOME}"
+    export CUDA_PATH="${MAXRL_CUDA_HOME}"
+    export CUDA_BIN_PATH="${MAXRL_CUDA_HOME}"
+    export CUDACXX="${MAXRL_CUDA_HOME}/bin/nvcc"
+    export CUDAToolkit_ROOT="${MAXRL_CUDA_HOME}"
+    export CUDA_TOOLKIT_ROOT_DIR="${MAXRL_CUDA_HOME}"
+    export PATH="${MAXRL_CUDA_HOME}/bin:${PATH}"
+    local filtered_cpath
+    local filtered_cmake_prefix_path
+    local filtered_library_path
+    local filtered_ld_library_path
+    filtered_cpath=$(without_other_cuda_toolkits "${CPATH:-}")
+    filtered_cmake_prefix_path=$(without_other_cuda_toolkits "${CMAKE_PREFIX_PATH:-}")
+    filtered_library_path=$(without_other_cuda_toolkits "${LIBRARY_PATH:-}")
+    filtered_ld_library_path=$(without_other_cuda_toolkits "${LD_LIBRARY_PATH:-}")
+    export CPATH="${MAXRL_CUDA_HOME}/include${filtered_cpath:+:${filtered_cpath}}"
+    export CMAKE_PREFIX_PATH="${MAXRL_CUDA_HOME}${filtered_cmake_prefix_path:+:${filtered_cmake_prefix_path}}"
+    export LIBRARY_PATH="${MAXRL_CUDA_HOME}/lib64${filtered_library_path:+:${filtered_library_path}}"
+    export LD_LIBRARY_PATH="${MAXRL_CUDA_HOME}/lib64${filtered_ld_library_path:+:${filtered_ld_library_path}}"
+    export CC="${MAXRL_HOST_CC}"
+    export CXX="${MAXRL_HOST_CXX}"
+    if [[ -n "${MAXRL_CUDA_COMPILER_LAUNCHER}" ]]; then
+        [[ -x "${MAXRL_CUDA_COMPILER_LAUNCHER}" ]] || \
+            die "CUDA compiler launcher is not executable: ${MAXRL_CUDA_COMPILER_LAUNCHER}"
+        export CMAKE_CUDA_COMPILER_LAUNCHER="${MAXRL_CUDA_COMPILER_LAUNCHER}"
+    fi
+}
+
+has_distribution_version() {
+    python - "$1" "$2" "$3" <<'PY'
+import sys
+from importlib.metadata import PackageNotFoundError, version
+
+from packaging.version import Version
+
+try:
+    actual = Version(version(sys.argv[1]))
+except PackageNotFoundError:
+    raise SystemExit(1)
+expected_local = sys.argv[3]
+if expected_local:
+    matches = (
+        actual.base_version == sys.argv[2]
+        and actual.local == expected_local
+    )
+else:
+    matches = str(actual) == sys.argv[2]
+raise SystemExit(not matches)
+PY
+}
+
+source_requirement_is_satisfied() {
+    case "$1" in
+        triton\ @*)
+            has_distribution_version triton 3.2.0 ""
+            ;;
+        vllm\ @*)
+            has_distribution_version \
+                vllm "${MAXRL_EXPECTED_VLLM_VERSION}" \
+                "${MAXRL_EXPECTED_VLLM_LOCAL_VERSION}"
+            ;;
+        tensordict\ @*)
+            has_distribution_version tensordict 0.6.2 ""
+            ;;
+        flash-attn==*)
+            has_distribution_version flash-attn 2.7.4.post1 ""
+            ;;
+        flashinfer-python==*)
+            has_distribution_version flashinfer-python 0.2.2.post1 ""
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 activate_environment() {
@@ -41,7 +197,44 @@ install_environment() {
     if [[ -n "${MAXRL_REQUIREMENTS_FILE}" ]]; then
         [[ -f "${MAXRL_REQUIREMENTS_FILE}" ]] || \
             die "requirements file not found: ${MAXRL_REQUIREMENTS_FILE}"
-        python -m pip install --no-cache-dir -r "${MAXRL_REQUIREMENTS_FILE}"
+        if [[ -n "${MAXRL_BOOTSTRAP_REQUIREMENTS_FILE}" ]]; then
+            [[ -f "${MAXRL_PYTORCH_REQUIREMENTS_FILE}" ]] || \
+                die "PyTorch requirements file not found: ${MAXRL_PYTORCH_REQUIREMENTS_FILE}"
+            [[ -f "${MAXRL_BOOTSTRAP_REQUIREMENTS_FILE}" ]] || \
+                die "bootstrap requirements file not found: ${MAXRL_BOOTSTRAP_REQUIREMENTS_FILE}"
+            [[ -f "${MAXRL_SOURCE_REQUIREMENTS_FILE}" ]] || \
+                die "source requirements file not found: ${MAXRL_SOURCE_REQUIREMENTS_FILE}"
+            configure_cuda_source_build
+            python -m pip install --no-cache-dir \
+                -r "${MAXRL_PYTORCH_REQUIREMENTS_FILE}"
+            python -m pip install --no-cache-dir \
+                -r "${MAXRL_BOOTSTRAP_REQUIREMENTS_FILE}"
+            python -m pip install --no-cache-dir \
+                -r "${MAXRL_REQUIREMENTS_FILE}"
+
+            # Install native extensions separately so a later build failure does
+            # not discard wheels that were already compiled successfully.
+            local requirement
+            while IFS= read -r requirement || [[ -n "${requirement}" ]]; do
+                [[ "${requirement}" =~ ^[[:space:]]*($|#) ]] && continue
+                if source_requirement_is_satisfied "${requirement}"; then
+                    echo "Requirement already satisfied: ${requirement}"
+                    continue
+                fi
+                MAX_JOBS="${MAXRL_INSTALL_JOBS}" \
+                    NVCC_THREADS="${MAXRL_NVCC_THREADS}" \
+                    TORCH_CUDA_ARCH_LIST="${MAXRL_CUDA_ARCH_LIST}" \
+                    FLASH_ATTN_CUDA_ARCHS="${MAXRL_FLASH_ATTN_CUDA_ARCHS}" \
+                    FLASH_ATTENTION_FORCE_BUILD=TRUE \
+                    CMAKE_BUILD_TYPE="${MAXRL_CMAKE_BUILD_TYPE}" \
+                    CMAKE_BUILD_PARALLEL_LEVEL="${MAXRL_INSTALL_JOBS}" \
+                    VLLM_TARGET_DEVICE=cuda \
+                    python -m pip install --no-cache-dir --no-build-isolation \
+                    "${requirement}"
+            done < "${MAXRL_SOURCE_REQUIREMENTS_FILE}"
+        else
+            python -m pip install --no-cache-dir -r "${MAXRL_REQUIREMENTS_FILE}"
+        fi
         python -m pip install --no-deps -e "${REPO_ROOT}"
         return
     fi
@@ -84,26 +277,48 @@ install_environment() {
 validate_environment() {
     python -m pip check
     python - <<'PY'
+import os
 from importlib.metadata import version
+
+from packaging.version import Version
 
 import flash_attn
 import flashinfer
 import pkg_resources
 import ray
 import torch
+import torch._inductor.runtime.triton_heuristics
 import transformers
 import vllm
 
 expected = {
     "ray": "2.43.0",
-    "torch": "2.6.0+cu124",
+    "torch": os.environ["MAXRL_EXPECTED_TORCH_VERSION"],
     "transformers": "4.51.3",
-    "vllm": "0.8.4",
+    "triton": "3.2.0",
+    "vllm": os.environ["MAXRL_EXPECTED_VLLM_VERSION"],
 }
 actual = {package: version(package) for package in expected}
-if actual != expected:
+exact_packages = {"ray", "torch", "transformers", "triton"}
+if any(actual[package] != expected[package] for package in exact_packages):
     raise SystemExit(f"Unexpected core package versions: {actual}")
+vllm_version = Version(actual["vllm"])
+if vllm_version.base_version != expected["vllm"]:
+    raise SystemExit(f"Unexpected core package versions: {actual}")
+expected_vllm_local = os.environ["MAXRL_EXPECTED_VLLM_LOCAL_VERSION"]
+if expected_vllm_local and vllm_version.local != expected_vllm_local:
+    raise SystemExit(
+        f"Unexpected vLLM CUDA build: {actual['vllm']}; "
+        f"expected local version {expected_vllm_local}"
+    )
+expected_torch_cuda = os.environ["MAXRL_EXPECTED_TORCH_CUDA"]
+if expected_torch_cuda and torch.version.cuda != expected_torch_cuda:
+    raise SystemExit(
+        f"Unexpected PyTorch CUDA runtime: {torch.version.cuda}; "
+        f"expected {expected_torch_cuda}"
+    )
 print("Validated core packages:", actual)
+print("Validated PyTorch CUDA runtime:", torch.version.cuda)
 PY
 }
 
@@ -125,6 +340,11 @@ else
     activate_environment
     install_environment
     validate_environment
+fi
+
+if [[ "${MAXRL_ENV_ONLY}" == "1" ]]; then
+    echo "Environment ${MAXRL_ENV_NAME} is ready; skipping data preparation and training"
+    exit 0
 fi
 
 cd "${REPO_ROOT}"
