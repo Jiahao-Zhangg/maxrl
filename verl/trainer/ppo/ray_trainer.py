@@ -47,6 +47,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_cost_aware_maxrl_metrics,
     compute_data_metrics,
     compute_fixed_n_rb_cost_aware_marginrl_metrics,
+    compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics,
     compute_rb_cost_aware_maxrl_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -333,26 +334,77 @@ def compute_advantage(
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
-    elif adv_estimator == AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL:
+    elif adv_estimator in (
+        AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+        AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+    ):
         calculation_mask = data.batch["response_mask"]
         trajectory_cost_mask = data.batch["response_mask"]
         if multi_turn:
             response_length = calculation_mask.size(1)
             calculation_mask = data.batch["loss_mask"][:, -response_length:]
 
-        advantages, returns, diagnostics = (
-            core_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
-                token_level_rewards=data.batch["token_level_rewards"],
-                response_mask=calculation_mask,
-                trajectory_cost_mask=trajectory_cost_mask,
-                index=data.non_tensor_batch["uid"],
-                expected_group_size=num_repeat,
-                return_diagnostics=True,
+        success_gated = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED
+        )
+        capped_cost = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL
+        )
+        capped_fixed_q = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL
+        )
+        efficient_reasoning_cost = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
+        )
+        if efficient_reasoning_cost:
+            advantage_fn = (
+                core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage
             )
+        elif success_gated:
+            advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage
+        elif capped_fixed_q:
+            advantage_fn = core_algos.compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage
+        elif capped_cost:
+            advantage_fn = core_algos.compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage
+        else:
+            advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage
+        advantages, returns, diagnostics = advantage_fn(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            trajectory_cost_mask=trajectory_cost_mask,
+            index=data.non_tensor_batch["uid"],
+            expected_group_size=num_repeat,
+            config=config,
+            return_diagnostics=True,
         )
-        data.meta_info["fixed_n_rb_marginrl_metrics"] = (
-            compute_fixed_n_rb_cost_aware_marginrl_metrics(**diagnostics)
-        )
+        if efficient_reasoning_cost:
+            metric_prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+        elif success_gated:
+            metric_prefix = "fixed_n_rb_marginrl_success_gated"
+        elif capped_fixed_q:
+            metric_prefix = "fixed_n_rb_capped_fixed_q_marginrl"
+        elif capped_cost:
+            metric_prefix = "fixed_n_rb_capped_marginrl"
+        else:
+            metric_prefix = "fixed_n_rb_marginrl"
+        if efficient_reasoning_cost:
+            marginrl_metrics = compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
+                **diagnostics,
+                metric_prefix=metric_prefix,
+            )
+        else:
+            marginrl_metrics = compute_fixed_n_rb_cost_aware_marginrl_metrics(
+                **diagnostics,
+                metric_prefix=metric_prefix,
+            )
+        data.meta_info["fixed_n_rb_marginrl_metrics"] = marginrl_metrics
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
@@ -517,6 +569,9 @@ class RayPPOTrainer:
             AdvantageEstimator.COST_AWARE_MAXRL,
             AdvantageEstimator.RB_COST_AWARE_MAXRL,
             AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+            AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
             AdvantageEstimator.PKPO,
             AdvantageEstimator.MACLAURIN,
             AdvantageEstimator.CROSS_FITTED_MACLAURIN,

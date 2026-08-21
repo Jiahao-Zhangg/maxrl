@@ -19,7 +19,12 @@ import torch
 from verl.trainer.ppo.core_algos import (
     AdvantageEstimator,
     agg_loss,
+    compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage,
+    compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage,
+    compute_fixed_n_rb_capped_marginrl_costs,
     compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage,
+    compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage,
+    compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage,
 )
 
 
@@ -83,6 +88,309 @@ def test_same_group_plugin_gives_zero_all_failure_update():
     torch.testing.assert_close(diagnostics["group_q_hats"], torch.tensor([0.0]))
     torch.testing.assert_close(advantages, torch.zeros_like(advantages))
     torch.testing.assert_close(returns, advantages)
+
+
+def test_success_gated_variant_zeros_failure_advantages_only():
+    response_mask = make_response_mask([2, 3, 5], width=5)
+    advantages, returns, diagnostics = (
+        compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage(
+            token_level_rewards=make_token_rewards([1.0, 0.0, 1.0], width=5),
+            response_mask=response_mask,
+            index=np.array(["prompt", "prompt", "prompt"]),
+            expected_group_size=3,
+            return_diagnostics=True,
+        )
+    )
+
+    # M=2, total cost=10, and q_hat=0.2. The success branch is unchanged
+    # from fixed-N RB MarginRL, while the failed trajectory is gated to zero.
+    torch.testing.assert_close(
+        diagnostics["raw_trajectory_advantages"],
+        torch.tensor([0.3, 0.0, 0.0]),
+    )
+    torch.testing.assert_close(
+        diagnostics["optimizer_trajectory_advantages"],
+        torch.tensor([0.9, 0.0, 0.0]),
+    )
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask),
+        torch.tensor([0.9, 0.0, 0.0]),
+    )
+    torch.testing.assert_close(returns, advantages)
+
+
+def test_success_gated_dispatch_uses_distinct_metrics_and_zero_wrong_update():
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    response_mask = make_response_mask([1, 3, 2, 4], width=4)
+    trajectory_rewards = torch.tensor([1.0, 0.0, 1.0, 1.0])
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": make_token_rewards(trajectory_rewards.tolist(), width=4),
+            "response_mask": response_mask,
+        },
+        non_tensors={"uid": np.array(["a", "a", "b", "b"])},
+    )
+
+    result = compute_advantage(
+        data=data,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+        num_repeat=2,
+        config={},
+    )
+    wrong_advantages = result.batch["advantages"][trajectory_rewards == 0]
+    metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
+
+    torch.testing.assert_close(wrong_advantages, torch.zeros_like(wrong_advantages))
+    assert metrics["fixed_n_rb_marginrl_success_gated/failure_advantage_abs_max"] == 0.0
+    assert metrics["fixed_n_rb_marginrl_success_gated/M_t_mean"] == pytest.approx(1.5)
+    assert "fixed_n_rb_marginrl/M_t_mean" not in metrics
+
+
+def test_capped_costs_normalize_lengths_and_floor_at_one_quarter():
+    response_mask = make_response_mask([1, 2, 8, 16], width=16)
+
+    lengths, costs, cap_mask = compute_fixed_n_rb_capped_marginrl_costs(
+        response_mask=response_mask,
+        cost_reference_tokens=8,
+        max_inverse_cost=4.0,
+    )
+
+    torch.testing.assert_close(lengths, torch.tensor([1.0, 2.0, 8.0, 16.0]))
+    torch.testing.assert_close(costs, torch.tensor([0.25, 0.25, 1.0, 2.0]))
+    torch.testing.assert_close(cap_mask, torch.tensor([True, False, False, False]))
+
+
+def test_capped_cost_estimator_uses_effective_cost_in_q_hat_and_advantages():
+    response_mask = make_response_mask([1, 2, 8, 16], width=16)
+    advantages, returns, diagnostics = compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=make_token_rewards([1.0, 0.0, 1.0, 0.0], width=16),
+        response_mask=response_mask,
+        index=np.array(["prompt"] * 4),
+        expected_group_size=4,
+        cost_reference_tokens=8,
+        max_inverse_cost=4.0,
+        return_diagnostics=True,
+    )
+
+    # Effective costs are [1/4, 1/4, 1, 2], so M=2 and q_hat=2/(7/2)=4/7.
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.tensor([4.0 / 7.0]))
+    torch.testing.assert_close(
+        diagnostics["raw_trajectory_advantages"],
+        torch.tensor([3.0 / 7.0, -1.0 / 21.0, 3.0 / 14.0, -8.0 / 21.0]),
+    )
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask),
+        4.0 * diagnostics["raw_trajectory_advantages"],
+    )
+    torch.testing.assert_close(returns, advantages)
+
+
+def test_capped_cost_dispatch_records_tokens_costs_and_cap_ratio():
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    response_mask = make_response_mask([1, 2, 8, 16], width=16)
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": make_token_rewards([1.0, 0.0, 1.0, 0.0], width=16),
+            "response_mask": response_mask,
+        },
+        non_tensors={"uid": np.array(["prompt"] * 4)},
+    )
+
+    result = compute_advantage(
+        data=data,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+        num_repeat=4,
+        config={"cost_reference_tokens": 8, "max_inverse_cost": 4.0},
+    )
+    metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
+
+    assert metrics["fixed_n_rb_capped_marginrl/trajectory_tokens_mean"] == pytest.approx(6.75)
+    assert metrics["fixed_n_rb_capped_marginrl/cost_mean"] == pytest.approx(0.875)
+    assert metrics["fixed_n_rb_capped_marginrl/cost_min"] == pytest.approx(0.25)
+    assert metrics["fixed_n_rb_capped_marginrl/cap_ratio"] == pytest.approx(0.25)
+
+
+def test_capped_fixed_q_estimator_uses_two_for_every_group():
+    response_mask = make_response_mask([1, 2, 8, 16], width=16)
+    advantages, returns, diagnostics = (
+        compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage(
+            token_level_rewards=make_token_rewards([1.0, 0.0, 1.0, 0.0], width=16),
+            response_mask=response_mask,
+            index=np.array(["prompt"] * 4),
+            expected_group_size=4,
+            cost_reference_tokens=8,
+            max_inverse_cost=4.0,
+            fixed_q_hat=2.0,
+            return_diagnostics=True,
+        )
+    )
+
+    # Effective costs are [1/4, 1/4, 1, 2], M=2, and q_hat is fixed at 2.
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.tensor([2.0]))
+    torch.testing.assert_close(
+        diagnostics["raw_trajectory_advantages"],
+        torch.tensor([1.0 / 4.0, -1.0 / 6.0, -1.0 / 2.0, -4.0 / 3.0]),
+    )
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask),
+        4.0 * diagnostics["raw_trajectory_advantages"],
+    )
+    torch.testing.assert_close(returns, advantages)
+
+
+def test_capped_fixed_q_all_failure_group_retains_cost_update():
+    response_mask = make_response_mask([1, 2], width=2)
+    _, _, diagnostics = compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=make_token_rewards([0.0, 0.0], width=2),
+        response_mask=response_mask,
+        index=np.array(["prompt", "prompt"]),
+        expected_group_size=2,
+        cost_reference_tokens=8,
+        max_inverse_cost=4.0,
+        fixed_q_hat=2.0,
+        return_diagnostics=True,
+    )
+
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.tensor([2.0]))
+    torch.testing.assert_close(
+        diagnostics["raw_trajectory_advantages"],
+        torch.tensor([-0.5, -0.5]),
+    )
+
+
+def test_capped_fixed_q_dispatch_uses_distinct_metrics():
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    response_mask = make_response_mask([1, 2, 8, 16], width=16)
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": make_token_rewards([1.0, 0.0, 1.0, 0.0], width=16),
+            "response_mask": response_mask,
+        },
+        non_tensors={"uid": np.array(["prompt"] * 4)},
+    )
+
+    result = compute_advantage(
+        data=data,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
+        num_repeat=4,
+        config={
+            "cost_reference_tokens": 8,
+            "max_inverse_cost": 4.0,
+            "fixed_q_hat": 2.0,
+        },
+    )
+    metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
+
+    assert metrics["fixed_n_rb_capped_fixed_q_marginrl/q_hat_mean"] == pytest.approx(2.0)
+    assert metrics["fixed_n_rb_capped_fixed_q_marginrl/q_hat_std"] == pytest.approx(0.0)
+    assert metrics["fixed_n_rb_capped_fixed_q_marginrl/cost_min"] == pytest.approx(0.25)
+    assert metrics["fixed_n_rb_capped_fixed_q_marginrl/cap_ratio"] == pytest.approx(0.25)
+    assert "fixed_n_rb_capped_marginrl/q_hat_mean" not in metrics
+
+
+def test_efficient_reasoning_cost_uses_correct_response_length_statistics():
+    response_mask = make_response_mask([2, 4, 6, 8], width=8)
+    advantages, returns, diagnostics = (
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
+            token_level_rewards=make_token_rewards([1.0, 0.0, 1.0, 0.0], width=8),
+            response_mask=response_mask,
+            index=np.array(["prompt"] * 4),
+            expected_group_size=4,
+            efficient_reasoning_alpha=0.1,
+            return_diagnostics=True,
+        )
+    )
+
+    # Correct lengths [2, 6] have population mean 4 and std 2. Only the
+    # correct trajectories use sigmoid costs in the advantage; wrong ones are gated.
+    expected_relative_lengths = torch.tensor([-1.0, 0.0, 1.0, 2.0])
+    expected_costs = torch.sigmoid(expected_relative_lengths)
+    expected_raw = torch.tensor(
+        [
+            (1.0 - 0.1 * expected_costs[0]) / 2.0,
+            0.0,
+            (1.0 - 0.1 * expected_costs[2]) / 2.0,
+            0.0,
+        ]
+    )
+    torch.testing.assert_close(diagnostics["trajectory_relative_lengths"], expected_relative_lengths)
+    torch.testing.assert_close(diagnostics["trajectory_costs"], expected_costs)
+    torch.testing.assert_close(
+        diagnostics["trajectory_cost_valid_mask"],
+        torch.tensor([True, False, True, False]),
+    )
+    torch.testing.assert_close(diagnostics["group_correct_length_means"], torch.tensor([4.0]))
+    torch.testing.assert_close(diagnostics["group_correct_length_stds"], torch.tensor([2.0]))
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.tensor([0.1]))
+    torch.testing.assert_close(diagnostics["raw_trajectory_advantages"], expected_raw)
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask),
+        4.0 * expected_raw,
+    )
+    torch.testing.assert_close(returns, advantages)
+
+
+def test_efficient_reasoning_cost_all_failure_group_has_zero_advantage():
+    response_mask = make_response_mask([1, 4], width=4)
+    advantages, returns, diagnostics = (
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
+            token_level_rewards=make_token_rewards([0.0, 0.0], width=4),
+            response_mask=response_mask,
+            index=np.array(["prompt", "prompt"]),
+            expected_group_size=2,
+            return_diagnostics=True,
+        )
+    )
+
+    torch.testing.assert_close(advantages, torch.zeros_like(advantages))
+    torch.testing.assert_close(returns, advantages)
+    torch.testing.assert_close(diagnostics["trajectory_costs"], torch.tensor([0.5, 0.5]))
+    torch.testing.assert_close(diagnostics["trajectory_relative_lengths"], torch.zeros(2))
+    assert not diagnostics["trajectory_cost_valid_mask"].any().item()
+    torch.testing.assert_close(diagnostics["group_correct_length_means"], torch.zeros(1))
+    torch.testing.assert_close(diagnostics["group_correct_length_stds"], torch.zeros(1))
+
+
+def test_efficient_reasoning_cost_dispatch_logs_correct_only_metrics():
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    response_mask = make_response_mask([2, 4, 6, 8], width=8)
+    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": make_token_rewards(rewards.tolist(), width=8),
+            "response_mask": response_mask,
+        },
+        non_tensors={"uid": np.array(["prompt"] * 4)},
+    )
+
+    result = compute_advantage(
+        data=data,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+        num_repeat=4,
+        config={"efficient_reasoning_alpha": 0.1, "efficient_reasoning_epsilon": 1e-7},
+    )
+    metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
+    prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+
+    torch.testing.assert_close(
+        result.batch["advantages"][rewards == 0],
+        torch.zeros_like(result.batch["advantages"][rewards == 0]),
+    )
+    assert metrics[f"{prefix}/relative_cost_alpha"] == pytest.approx(0.1)
+    assert metrics[f"{prefix}/correct_cost_count"] == 2
+    assert metrics[f"{prefix}/correct_cost_mean"] == pytest.approx(0.5)
+    assert metrics[f"{prefix}/correct_relative_length_mean"] == pytest.approx(0.0)
+    assert metrics[f"{prefix}/correct_relative_length_std"] == pytest.approx(1.0)
+    assert metrics[f"{prefix}/failure_advantage_abs_max"] == 0.0
+    assert metrics[f"{prefix}/q_hat_mean"] == pytest.approx(0.1)
 
 
 def test_cost_scale_does_not_change_advantages():

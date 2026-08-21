@@ -425,12 +425,52 @@ elif [[ "${ADVANTAGE_ESTIMATOR}" == "rb_cost_aware_maxrl" ]]; then
     RB_COST_MAX_TOKENS=${MAXRL_RB_COST_MAX_TOKENS:-${MAX_RESPONSE_LENGTH}}
     ALGORITHM_OVERRIDES+=("algorithm.rb_cost_max_tokens=${RB_COST_MAX_TOKENS}")
     echo "RB cost-aware MaxRL: cost_max_tokens=${RB_COST_MAX_TOKENS}, zero-success update=zero"
-elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl" ]]; then
+elif [[
+    "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_cost_aware_marginrl"
+    || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
+]]; then
     if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
-        echo "error: fixed_n_rb_cost_aware_marginrl requires seq-mean-token-sum loss aggregation" >&2
+        echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
         exit 1
     fi
-    echo "Fixed-N RB cost-aware MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, q_hat=M/sum(tokens), zero-success update=zero"
+    COST_REFERENCE_TOKENS=${MAXRL_COST_REFERENCE_TOKENS:-$((MAX_RESPONSE_LENGTH / 2))}
+    MAX_INVERSE_COST=${MAXRL_MAX_INVERSE_COST:-4.0}
+    ALGORITHM_OVERRIDES+=(
+        "algorithm.cost_reference_tokens=${COST_REFERENCE_TOKENS}"
+        "algorithm.max_inverse_cost=${MAX_INVERSE_COST}"
+    )
+    if [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_fixed_q_cost_aware_marginrl" ]]; then
+        FIXED_Q_HAT=${MAXRL_FIXED_Q_HAT:-2.0}
+        ALGORITHM_OVERRIDES+=("algorithm.fixed_q_hat=${FIXED_Q_HAT}")
+        echo "Fixed-q capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=${FIXED_Q_HAT}"
+    else
+        echo "Capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=M/sum(cost)"
+    fi
+elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated" ]]; then
+    if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
+        exit 1
+    fi
+    EFFICIENT_REASONING_ALPHA=${MAXRL_EFFICIENT_REASONING_ALPHA:-0.1}
+    EFFICIENT_REASONING_EPSILON=${MAXRL_EFFICIENT_REASONING_EPSILON:-1e-7}
+    ALGORITHM_OVERRIDES+=(
+        "algorithm.efficient_reasoning_alpha=${EFFICIENT_REASONING_ALPHA}"
+        "algorithm.efficient_reasoning_epsilon=${EFFICIENT_REASONING_EPSILON}"
+    )
+    echo "Efficient-Reasoning-cost success-gated fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, alpha=${EFFICIENT_REASONING_ALPHA}, normalization=correct responses per prompt, wrong-sample advantage=zero"
+elif [[
+    "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl"
+    || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated"
+]]; then
+    if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
+        exit 1
+    fi
+    if [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated" ]]; then
+        echo "Success-gated fixed-N RB cost-aware MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, q_hat=M/sum(tokens), wrong-sample advantage=zero"
+    else
+        echo "Fixed-N RB cost-aware MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, q_hat=M/sum(tokens), zero-success update=zero"
+    fi
 fi
 
 echo "Training ${MODEL_NAME} with hiyouga/math12k for ${TOTAL_EPOCHS} epochs"

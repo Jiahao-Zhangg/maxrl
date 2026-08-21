@@ -127,6 +127,12 @@ class AdvantageEstimator(str, Enum):
     COST_AWARE_MAXRL = "cost_aware_maxrl"
     RB_COST_AWARE_MAXRL = "rb_cost_aware_maxrl"
     FIXED_N_RB_COST_AWARE_MARGINRL = "fixed_n_rb_cost_aware_marginrl"
+    FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED = "fixed_n_rb_cost_aware_marginrl_success_gated"
+    FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL = "fixed_n_rb_capped_cost_aware_marginrl"
+    FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL = "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
+    FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED = (
+        "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated"
+    )
     PKPO = "pkpo"
     MACLAURIN = "maclaurin"
     MACLAURIN_BASELINE = "maclaurin_baseline"
@@ -677,13 +683,155 @@ def compute_rb_cost_aware_maxrl_outcome_advantage(
     return advantages, advantages
 
 
+def compute_fixed_n_rb_capped_marginrl_costs(
+    response_mask: torch.Tensor,
+    cost_reference_tokens: float,
+    max_inverse_cost: float = 4.0,
+):
+    """Compute normalized fixed-N trajectory costs with an inverse-cost cap.
+
+    The effective cost is ``max(length / cost_reference_tokens,
+    1 / max_inverse_cost)``. Thus, using half the maximum response length as
+    the reference and an inverse-cost cap of four floors cost at ``1/4``.
+    """
+    if response_mask.ndim != 2:
+        raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
+
+    cost_reference_tokens = float(cost_reference_tokens)
+    if not math.isfinite(cost_reference_tokens) or cost_reference_tokens <= 0:
+        raise ValueError(f"cost_reference_tokens must be finite and positive, got {cost_reference_tokens}")
+
+    max_inverse_cost = float(max_inverse_cost)
+    if not math.isfinite(max_inverse_cost) or max_inverse_cost <= 0:
+        raise ValueError(f"max_inverse_cost must be finite and positive, got {max_inverse_cost}")
+
+    trajectory_lengths = response_mask.sum(dim=-1).detach().to(dtype=torch.float32)
+    if torch.any(trajectory_lengths <= 0).item():
+        raise ValueError("fixed-N trajectories must contain at least one response token")
+
+    raw_costs = trajectory_lengths / cost_reference_tokens
+    minimum_cost = 1.0 / max_inverse_cost
+    inverse_cost_cap_mask = raw_costs < minimum_cost
+    trajectory_costs = raw_costs.clamp_min(minimum_cost)
+    return trajectory_lengths, trajectory_costs, inverse_cost_cap_mask
+
+
+def compute_efficient_reasoning_relative_costs(
+    response_mask: torch.Tensor,
+    binary_rewards: torch.Tensor,
+    index: np.ndarray,
+    expected_group_size: Optional[int] = None,
+    epsilon: float = 1e-7,
+):
+    """Compute Efficient-Reasoning sigmoid costs relative to correct rollouts.
+
+    For each prompt, the response lengths are centered and scaled using the
+    population mean and standard deviation of *correct* response lengths. The
+    resulting cost is ``sigmoid((length - correct_mean) / (correct_std + eps))``.
+    Only correct-trajectory costs are used by the associated advantage
+    estimator. Costs are set to the neutral value ``1/2`` in all-failure groups
+    so diagnostics remain finite; those groups receive zero advantage.
+    """
+    if response_mask.ndim != 2:
+        raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
+    if binary_rewards.ndim != 1 or binary_rewards.shape[0] != response_mask.shape[0]:
+        raise ValueError(
+            "binary_rewards must have shape (batch_size,), "
+            f"got {tuple(binary_rewards.shape)}"
+        )
+    if index is None or len(index) != response_mask.shape[0]:
+        index_length = None if index is None else len(index)
+        raise ValueError(
+            "index must contain one prompt identifier per trajectory; "
+            f"got {index_length} identifiers for {response_mask.shape[0]} trajectories"
+        )
+    epsilon = float(epsilon)
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError(f"efficient_reasoning_epsilon must be finite and positive, got {epsilon}")
+    if expected_group_size is not None:
+        expected_group_size = int(expected_group_size)
+        if expected_group_size <= 0:
+            raise ValueError(f"expected_group_size must be positive, got {expected_group_size}")
+
+    trajectory_lengths = response_mask.sum(dim=-1).detach().to(dtype=torch.float32)
+    if torch.any(trajectory_lengths <= 0).item():
+        raise ValueError("fixed-N trajectories must contain at least one response token")
+
+    rewards = binary_rewards.detach().to(device=response_mask.device, dtype=torch.float32)
+    is_zero = torch.isclose(rewards, torch.zeros_like(rewards), rtol=0.0, atol=1e-6)
+    is_one = torch.isclose(rewards, torch.ones_like(rewards), rtol=0.0, atol=1e-6)
+    if not torch.all(is_zero | is_one).item():
+        raise ValueError("Efficient-Reasoning relative costs require binary trajectory rewards")
+    correct_mask = is_one
+
+    with torch.no_grad():
+        id2positions = defaultdict(list)
+        for position, prompt_id in enumerate(index):
+            id2positions[prompt_id].append(position)
+        if not id2positions:
+            raise ValueError("Efficient-Reasoning relative costs require at least one prompt group")
+
+        observed_group_sizes = {len(positions) for positions in id2positions.values()}
+        if len(observed_group_sizes) != 1:
+            raise ValueError(
+                "Efficient-Reasoning relative costs require one fixed rollout count per prompt; "
+                f"found group sizes {sorted(observed_group_sizes)}"
+            )
+        observed_group_size = next(iter(observed_group_sizes))
+        if expected_group_size is not None and observed_group_size != expected_group_size:
+            raise ValueError(
+                "Efficient-Reasoning relative-cost rollout count mismatch: "
+                f"expected {expected_group_size}, found {observed_group_size}"
+            )
+
+        relative_lengths = torch.zeros_like(trajectory_lengths)
+        relative_costs = torch.full_like(trajectory_lengths, 0.5)
+        group_correct_length_means = []
+        group_correct_length_stds = []
+
+        for positions in id2positions.values():
+            position_tensor = torch.as_tensor(positions, dtype=torch.long, device=response_mask.device)
+            group_lengths = trajectory_lengths.index_select(0, position_tensor)
+            group_correct_mask = correct_mask.index_select(0, position_tensor)
+            correct_lengths = group_lengths[group_correct_mask]
+            if correct_lengths.numel() == 0:
+                correct_mean = group_lengths.new_zeros(())
+                correct_std = group_lengths.new_zeros(())
+                group_relative_lengths = torch.zeros_like(group_lengths)
+                group_relative_costs = torch.full_like(group_lengths, 0.5)
+            else:
+                correct_mean = correct_lengths.mean()
+                correct_std = correct_lengths.std(unbiased=False)
+                group_relative_lengths = (group_lengths - correct_mean) / (correct_std + epsilon)
+                group_relative_costs = torch.sigmoid(group_relative_lengths)
+
+            relative_lengths.index_copy_(0, position_tensor, group_relative_lengths)
+            relative_costs.index_copy_(0, position_tensor, group_relative_costs)
+            group_correct_length_means.append(correct_mean)
+            group_correct_length_stds.append(correct_std)
+
+    return (
+        trajectory_lengths,
+        relative_costs,
+        relative_lengths,
+        correct_mask,
+        torch.stack(group_correct_length_means),
+        torch.stack(group_correct_length_stds),
+    )
+
+
 @register_adv_est(AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL)
 def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     trajectory_cost_mask: Optional[torch.Tensor] = None,
+    trajectory_costs: Optional[torch.Tensor] = None,
+    trajectory_lengths: Optional[torch.Tensor] = None,
+    inverse_cost_cap_mask: Optional[torch.Tensor] = None,
     expected_group_size: Optional[int] = None,
+    success_gated: bool = False,
+    fixed_q_hat: Optional[float] = None,
     return_diagnostics: bool = False,
     **kwargs,
 ):
@@ -694,7 +842,11 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
     same-group rate estimate. The raw trajectory coefficient is
 
     ``(1 - q_hat * c_i) / M`` for a success and
-    ``-q_hat * c_i / (M + 1)`` for a failure.
+    ``-q_hat * c_i / (M + 1)`` for a failure. When ``success_gated`` is
+    enabled, the failure coefficient is replaced by zero while the success
+    coefficient and same-group ``q_hat`` remain unchanged. Supplying
+    ``fixed_q_hat`` replaces the same-group plug-in estimate by that detached
+    constant; this retains a cost update for all-failure groups.
 
     The actor's ``seq-mean-token-sum`` aggregation averages over trajectories,
     whereas the estimator sums over the fixed rollout group. We therefore
@@ -710,13 +862,42 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
             "token_level_rewards and response_mask must have matching shapes, "
             f"got {tuple(token_level_rewards.shape)} and {tuple(response_mask.shape)}"
         )
-    if trajectory_cost_mask is None:
-        trajectory_cost_mask = response_mask
-    if trajectory_cost_mask.shape != response_mask.shape:
+    if trajectory_costs is None:
+        if trajectory_cost_mask is None:
+            trajectory_cost_mask = response_mask
+        if trajectory_cost_mask.shape != response_mask.shape:
+            raise ValueError(
+                "trajectory_cost_mask and response_mask must have matching shapes, "
+                f"got {tuple(trajectory_cost_mask.shape)} and {tuple(response_mask.shape)}"
+            )
+        trajectory_costs = trajectory_cost_mask.sum(dim=-1).detach().to(dtype=torch.float32)
+        if trajectory_lengths is None:
+            trajectory_lengths = trajectory_costs
+    else:
+        trajectory_costs = trajectory_costs.detach().to(device=response_mask.device, dtype=torch.float32)
+        if trajectory_costs.ndim != 1 or trajectory_costs.shape[0] != response_mask.shape[0]:
+            raise ValueError(
+                "trajectory_costs must have shape (batch_size,), "
+                f"got {tuple(trajectory_costs.shape)}"
+            )
+        if trajectory_lengths is None:
+            trajectory_lengths = response_mask.sum(dim=-1)
+
+    trajectory_lengths = trajectory_lengths.detach().to(device=response_mask.device, dtype=torch.float32)
+    if trajectory_lengths.ndim != 1 or trajectory_lengths.shape != trajectory_costs.shape:
         raise ValueError(
-            "trajectory_cost_mask and response_mask must have matching shapes, "
-            f"got {tuple(trajectory_cost_mask.shape)} and {tuple(response_mask.shape)}"
+            "trajectory_lengths and trajectory_costs must have matching one-dimensional shapes, "
+            f"got {tuple(trajectory_lengths.shape)} and {tuple(trajectory_costs.shape)}"
         )
+    if inverse_cost_cap_mask is None:
+        inverse_cost_cap_mask = torch.zeros_like(trajectory_costs, dtype=torch.bool)
+    else:
+        inverse_cost_cap_mask = inverse_cost_cap_mask.detach().to(device=response_mask.device, dtype=torch.bool)
+        if inverse_cost_cap_mask.shape != trajectory_costs.shape:
+            raise ValueError(
+                "inverse_cost_cap_mask and trajectory_costs must have matching shapes, "
+                f"got {tuple(inverse_cost_cap_mask.shape)} and {tuple(trajectory_costs.shape)}"
+            )
     if index is None:
         raise ValueError("index is required for fixed_n_rb_cost_aware_marginrl prompt grouping")
     if len(index) != token_level_rewards.shape[0]:
@@ -727,9 +908,12 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
         expected_group_size = int(expected_group_size)
         if expected_group_size <= 0:
             raise ValueError(f"expected_group_size must be positive, got {expected_group_size}")
+    if fixed_q_hat is not None:
+        fixed_q_hat = float(fixed_q_hat)
+        if not math.isfinite(fixed_q_hat) or fixed_q_hat < 0:
+            raise ValueError(f"fixed_q_hat must be finite and nonnegative, got {fixed_q_hat}")
 
     scores = token_level_rewards.sum(dim=-1).detach().to(dtype=torch.float32)
-    trajectory_costs = trajectory_cost_mask.sum(dim=-1).detach().to(dtype=torch.float32)
     if not torch.isfinite(trajectory_costs).all().item() or torch.any(trajectory_costs <= 0).item():
         raise ValueError("fixed-N trajectory costs must be finite and strictly positive")
 
@@ -779,14 +963,20 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
             group_size = len(positions)
             success_count = group_rewards.sum()
             total_cost = group_costs.sum()
-            q_hat = (success_count / total_cost).detach()
+            if fixed_q_hat is None:
+                q_hat = (success_count / total_cost).detach()
+            else:
+                q_hat = success_count.new_tensor(fixed_q_hat).detach()
             q_cost = q_hat * group_costs
 
             # torch.where evaluates both branches, so use a safe denominator
             # even though the success branch is inactive when M == 0.
             safe_success_count = success_count.clamp_min(1.0)
             success_advantages = (1.0 - q_cost) / safe_success_count
-            failure_advantages = -q_cost / (success_count + 1.0)
+            if success_gated:
+                failure_advantages = torch.zeros_like(q_cost)
+            else:
+                failure_advantages = -q_cost / (success_count + 1.0)
             group_raw_advantages = torch.where(
                 group_rewards.to(dtype=torch.bool),
                 success_advantages,
@@ -805,7 +995,10 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
 
         advantages = optimizer_trajectory_advantages.unsqueeze(-1) * response_mask
         diagnostics = {
+            "trajectory_lengths": trajectory_lengths,
             "trajectory_costs": trajectory_costs,
+            "inverse_cost_cap_mask": inverse_cost_cap_mask,
+            "trajectory_rewards": binary_rewards,
             "raw_trajectory_advantages": raw_trajectory_advantages,
             "optimizer_trajectory_advantages": optimizer_trajectory_advantages,
             "group_q_hats": torch.stack(group_q_hats),
@@ -819,6 +1012,205 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
     if return_diagnostics:
         return advantages, advantages, diagnostics
     return advantages, advantages
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL)
+def compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    config=None,
+    cost_reference_tokens: Optional[float] = None,
+    max_inverse_cost: float = 4.0,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute fixed-N RB MarginRL using normalized, lower-bounded costs."""
+    if config is not None:
+        cost_reference_tokens = config.get("cost_reference_tokens", cost_reference_tokens)
+        max_inverse_cost = config.get("max_inverse_cost", max_inverse_cost)
+    if cost_reference_tokens is None:
+        raise ValueError("cost_reference_tokens is required for fixed_n_rb_capped_cost_aware_marginrl")
+
+    cost_mask = response_mask if trajectory_cost_mask is None else trajectory_cost_mask
+    trajectory_lengths, trajectory_costs, inverse_cost_cap_mask = compute_fixed_n_rb_capped_marginrl_costs(
+        response_mask=cost_mask,
+        cost_reference_tokens=cost_reference_tokens,
+        max_inverse_cost=max_inverse_cost,
+    )
+    return compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_costs=trajectory_costs,
+        trajectory_lengths=trajectory_lengths,
+        inverse_cost_cap_mask=inverse_cost_cap_mask,
+        expected_group_size=expected_group_size,
+        return_diagnostics=return_diagnostics,
+        **kwargs,
+    )
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL)
+def compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    config=None,
+    cost_reference_tokens: Optional[float] = None,
+    max_inverse_cost: float = 4.0,
+    fixed_q_hat: float = 2.0,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute capped fixed-N RB MarginRL with a detached fixed rate estimate."""
+    if config is not None:
+        cost_reference_tokens = config.get("cost_reference_tokens", cost_reference_tokens)
+        max_inverse_cost = config.get("max_inverse_cost", max_inverse_cost)
+        fixed_q_hat = config.get("fixed_q_hat", fixed_q_hat)
+    if cost_reference_tokens is None:
+        raise ValueError(
+            "cost_reference_tokens is required for "
+            "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
+        )
+
+    cost_mask = response_mask if trajectory_cost_mask is None else trajectory_cost_mask
+    trajectory_lengths, trajectory_costs, inverse_cost_cap_mask = compute_fixed_n_rb_capped_marginrl_costs(
+        response_mask=cost_mask,
+        cost_reference_tokens=cost_reference_tokens,
+        max_inverse_cost=max_inverse_cost,
+    )
+    return compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_costs=trajectory_costs,
+        trajectory_lengths=trajectory_lengths,
+        inverse_cost_cap_mask=inverse_cost_cap_mask,
+        expected_group_size=expected_group_size,
+        fixed_q_hat=fixed_q_hat,
+        return_diagnostics=return_diagnostics,
+        **kwargs,
+    )
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED)
+def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    config=None,
+    efficient_reasoning_alpha: float = 0.1,
+    efficient_reasoning_epsilon: float = 1e-7,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute success-gated fixed-N advantages with relative sigmoid cost.
+
+    For each prompt, let ``M`` be the number of correct trajectories and let
+    ``mu_+`` and ``sigma_+`` be the population mean and standard deviation of
+    their response lengths. A correct trajectory receives raw coefficient
+
+    ``(1 - alpha * sigmoid((length - mu_+) / (sigma_+ + epsilon))) / M``.
+
+    Incorrect trajectories and all-failure groups receive zero. Multiplication
+    by the fixed rollout count compensates for ``seq-mean-token-sum`` actor-loss
+    aggregation, as in the other fixed-N estimators.
+    """
+    if config is not None:
+        efficient_reasoning_alpha = config.get("efficient_reasoning_alpha", efficient_reasoning_alpha)
+        efficient_reasoning_epsilon = config.get("efficient_reasoning_epsilon", efficient_reasoning_epsilon)
+    efficient_reasoning_alpha = float(efficient_reasoning_alpha)
+    if not math.isfinite(efficient_reasoning_alpha) or efficient_reasoning_alpha < 0:
+        raise ValueError(
+            "efficient_reasoning_alpha must be finite and nonnegative, "
+            f"got {efficient_reasoning_alpha}"
+        )
+
+    scores = token_level_rewards.sum(dim=-1).detach().to(dtype=torch.float32)
+    is_zero = torch.isclose(scores, torch.zeros_like(scores), rtol=0.0, atol=1e-6)
+    is_one = torch.isclose(scores, torch.ones_like(scores), rtol=0.0, atol=1e-6)
+    if not torch.all(is_zero | is_one).item():
+        invalid_scores = scores[~(is_zero | is_one)][:8].cpu().tolist()
+        raise ValueError(
+            "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated requires binary "
+            f"trajectory rewards; found values such as {invalid_scores}"
+        )
+    binary_rewards = is_one.to(dtype=torch.float32)
+
+    cost_mask = response_mask if trajectory_cost_mask is None else trajectory_cost_mask
+    (
+        trajectory_lengths,
+        trajectory_costs,
+        trajectory_relative_lengths,
+        trajectory_cost_valid_mask,
+        group_correct_length_means,
+        group_correct_length_stds,
+    ) = compute_efficient_reasoning_relative_costs(
+        response_mask=cost_mask,
+        binary_rewards=binary_rewards,
+        index=index,
+        expected_group_size=expected_group_size,
+        epsilon=efficient_reasoning_epsilon,
+    )
+
+    advantages, returns, diagnostics = compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_costs=trajectory_costs,
+        trajectory_lengths=trajectory_lengths,
+        inverse_cost_cap_mask=torch.zeros_like(trajectory_costs, dtype=torch.bool),
+        expected_group_size=expected_group_size,
+        success_gated=True,
+        fixed_q_hat=efficient_reasoning_alpha,
+        return_diagnostics=True,
+        **kwargs,
+    )
+    diagnostics.update(
+        {
+            "trajectory_relative_lengths": trajectory_relative_lengths,
+            "trajectory_cost_valid_mask": trajectory_cost_valid_mask,
+            "group_correct_length_means": group_correct_length_means,
+            "group_correct_length_stds": group_correct_length_stds,
+            "group_relative_cost_alphas": torch.full_like(
+                group_correct_length_means,
+                efficient_reasoning_alpha,
+            ),
+        }
+    )
+    if return_diagnostics:
+        return advantages, returns, diagnostics
+    return advantages, returns
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED)
+def compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute fixed-N RB cost-aware advantages with failures gated to zero."""
+    return compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_cost_mask=trajectory_cost_mask,
+        expected_group_size=expected_group_size,
+        success_gated=True,
+        return_diagnostics=return_diagnostics,
+        **kwargs,
+    )
 
 
 @register_adv_est(AdvantageEstimator.GRPO_WITH_FILTERED_SFT)

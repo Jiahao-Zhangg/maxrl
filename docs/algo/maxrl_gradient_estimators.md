@@ -159,6 +159,89 @@ $K=0$ avoids learning solely from response length before a success is found,
 but makes the implemented estimator biased relative to
 $L_N(p)-L_N(q)$.
 
+## 4. Fixed-$N$ RB estimator with capped normalized cost
+
+This estimator preserves the fixed-rollout RB update while replacing raw token
+cost with
+
+\[
+\widetilde c_i=
+\max\!\left(\frac{L_i}{L_{\mathrm{ref}}},\frac1{w_{\max}}\right),
+\qquad
+L_{\mathrm{ref}}=L_{\max}/2,
+\qquad
+w_{\max}=4.
+\]
+
+For $M=\sum_i r_i$ and the detached same-batch rate
+$\widehat q=M/\sum_i\widetilde c_i$, its raw trajectory advantage is
+
+\[
+A_i^{\rm capped\text{-}RB}=
+\begin{cases}
+\displaystyle \frac{1-\widehat q\widetilde c_i}{M},&r_i=1,\\[2mm]
+\displaystyle -\frac{\widehat q\widetilde c_i}{M+1},&r_i=0.
+\end{cases}
+\]
+
+The optimizer receives $N A_i^{\rm capped\text{-}RB}$ because training uses
+`seq-mean-token-sum`. With a 4096-token response limit, all responses of 512
+tokens or fewer have the same effective cost $1/4$. This removes the incentive
+to become progressively shorter inside that range while retaining cost
+pressure above it. If $M=0$, then $\widehat q=0$ and the group update is zero.
+
+## 5. Fixed-$N$ RB estimator with fixed $\widehat q=2$
+
+This ablation keeps the capped normalized cost from Section 4,
+
+\[
+\widetilde c_i=\max\!\left(2L_i/L_{\max},1/4\right),
+\]
+
+but replaces the same-batch rate estimate by the detached constant
+$\widehat q=2$. Its trajectory advantages are
+
+\[
+A_i=
+\begin{cases}
+\displaystyle \frac{1-2\widetilde c_i}{M}, & r_i=1,\\[2mm]
+\displaystyle -\frac{2\widetilde c_i}{M+1}, & r_i=0.
+\end{cases}
+\]
+
+The success branch is only evaluated when $M>0$. Unlike the plug-in variant,
+an all-failure group has $A_i=-2\widetilde c_i$ and therefore retains a cost
+update. This is a fixed-rate ablation, not a same-batch estimate of
+$p/\mathbb E[c]$.
+
+## 6. Efficient-Reasoning relative cost with failures gated
+
+For each prompt, let $\mu_+$ and $\sigma_+$ be the population mean and standard
+deviation of the response lengths among its $M$ correct rollouts. The relative
+sigmoid cost for a correct rollout is
+
+\[
+c_i^{\rm ER}=\operatorname{sigmoid}\!\left(
+    \frac{L_i-\mu_+}{\sigma_++10^{-7}}
+\right).
+\]
+
+Using the Efficient-Reasoning coefficient $\alpha=0.1$, the raw trajectory
+advantage is
+
+\[
+A_i^{\rm ER}=
+\begin{cases}
+\displaystyle \frac{1-\alpha c_i^{\rm ER}}{M},&r_i=1,\\[2mm]
+0,&r_i=0.
+\end{cases}
+\]
+
+The optimizer again receives $N A_i^{\rm ER}$. An all-failure group receives
+zero advantage. This is a success-gated relative-length ablation: $\alpha$ is
+the detached length-penalty coefficient, not an estimate of
+$p/\mathbb E[c]$.
+
 ## Implementation map
 
 | Estimator | Registered name | Launcher |
@@ -166,10 +249,15 @@ $L_N(p)-L_N(q)$.
 | Original MaxRL | `maxrl` | `qwen3_experiments/run_qwen3_1_7b_math12k.sh` |
 | Capped inverse-cost | `cost_aware_maxrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_cost_aware.sh` |
 | Rao–Blackwellized, success-gated | `rb_cost_aware_maxrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_rb_cost_aware.sh` |
+| Fixed-$N$ RB | `fixed_n_rb_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_marginrl.sh` |
+| Fixed-$N$ RB, failures gated | `fixed_n_rb_cost_aware_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_marginrl_success_gated.sh` |
+| Fixed-$N$ RB, capped normalized cost | `fixed_n_rb_capped_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_marginrl.sh` |
+| Fixed-$N$ RB, capped cost and fixed $\widehat q$ | `fixed_n_rb_capped_fixed_q_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_fixed_q_marginrl.sh` |
+| Fixed-$N$, Efficient-Reasoning cost, failures gated | `fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_success_gated_marginrl.sh` |
 
-The two cost-aware launchers use `seq-mean-token-sum`, five epochs, Math12K,
-and separate W&B experiment and checkpoint names. The original launcher keeps
-the repository's `token-mean` default unless `MAXRL_LOSS_AGG_MODE` is set.
+The fixed-$N$ launchers use `seq-mean-token-sum`, five epochs, Math12K, and
+separate W&B experiment and checkpoint names. The original launcher keeps the
+repository's `token-mean` default unless `MAXRL_LOSS_AGG_MODE` is set.
 
 ## References
 
