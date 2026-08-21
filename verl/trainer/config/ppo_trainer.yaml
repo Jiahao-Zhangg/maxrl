@@ -879,10 +879,7 @@ algorithm:
   # Detached constant rate estimate used by fixed-q capped fixed-N RB MarginRL
   fixed_q_hat: 2.0
 
-  # Length-penalty coefficient for the Efficient-Reasoning relative sigmoid cost
-  efficient_reasoning_alpha: 0.1
-
-  # Numerical stabilizer added to the correct-response length standard deviation
+  # Numerical stabilizer added to each prompt group's response-length standard deviation
   efficient_reasoning_epsilon: 1.0e-7
 
   # Maximum trajectory cost used to map RB cost-aware MaxRL lengths into [0, 1]

@@ -24,7 +24,7 @@ from verl.trainer.ppo.core_algos import (
     compute_fixed_n_rb_capped_marginrl_costs,
     compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage,
     compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage,
-    compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage,
+    compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage,
 )
 
 
@@ -294,44 +294,47 @@ def test_capped_fixed_q_dispatch_uses_distinct_metrics():
     assert "fixed_n_rb_capped_marginrl/q_hat_mean" not in metrics
 
 
-def test_efficient_reasoning_cost_uses_correct_response_length_statistics():
-    response_mask = make_response_mask([2, 4, 6, 8], width=8)
+def test_efficient_reasoning_cost_normalizes_all_lengths_per_prompt_and_estimates_q_hat():
+    response_mask = make_response_mask([2, 4, 6, 10], width=10)
     advantages, returns, diagnostics = (
-        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
-            token_level_rewards=make_token_rewards([1.0, 0.0, 1.0, 0.0], width=8),
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
+            token_level_rewards=make_token_rewards([1.0, 0.0, 0.0, 1.0], width=10),
             response_mask=response_mask,
-            index=np.array(["prompt"] * 4),
-            expected_group_size=4,
-            efficient_reasoning_alpha=0.1,
+            index=np.array(["prompt-a", "prompt-a", "prompt-b", "prompt-b"]),
+            expected_group_size=2,
             return_diagnostics=True,
         )
     )
 
-    # Correct lengths [2, 6] have population mean 4 and std 2. Only the
-    # correct trajectories use sigmoid costs in the advantage; wrong ones are gated.
-    expected_relative_lengths = torch.tensor([-1.0, 0.0, 1.0, 2.0])
+    # Both correct and incorrect lengths contribute to each prompt's population
+    # statistics: means [3, 8] and standard deviations [1, 2].
+    expected_group_means = torch.tensor([3.0, 8.0])
+    expected_group_stds = torch.tensor([1.0, 2.0])
+    expected_relative_lengths = torch.tensor([-1.0, 1.0, -1.0, 1.0])
     expected_costs = torch.sigmoid(expected_relative_lengths)
+    expected_q_hats = torch.stack(
+        [
+            1.0 / expected_costs[:2].sum(),
+            1.0 / expected_costs[2:].sum(),
+        ]
+    )
     expected_raw = torch.tensor(
         [
-            (1.0 - 0.1 * expected_costs[0]) / 2.0,
-            0.0,
-            (1.0 - 0.1 * expected_costs[2]) / 2.0,
-            0.0,
+            1.0 - expected_q_hats[0] * expected_costs[0],
+            -expected_q_hats[0] * expected_costs[1] / 2.0,
+            -expected_q_hats[1] * expected_costs[2] / 2.0,
+            1.0 - expected_q_hats[1] * expected_costs[3],
         ]
     )
     torch.testing.assert_close(diagnostics["trajectory_relative_lengths"], expected_relative_lengths)
     torch.testing.assert_close(diagnostics["trajectory_costs"], expected_costs)
-    torch.testing.assert_close(
-        diagnostics["trajectory_cost_valid_mask"],
-        torch.tensor([True, False, True, False]),
-    )
-    torch.testing.assert_close(diagnostics["group_correct_length_means"], torch.tensor([4.0]))
-    torch.testing.assert_close(diagnostics["group_correct_length_stds"], torch.tensor([2.0]))
-    torch.testing.assert_close(diagnostics["group_q_hats"], torch.tensor([0.1]))
+    torch.testing.assert_close(diagnostics["group_length_means"], expected_group_means)
+    torch.testing.assert_close(diagnostics["group_length_stds"], expected_group_stds)
+    torch.testing.assert_close(diagnostics["group_q_hats"], expected_q_hats)
     torch.testing.assert_close(diagnostics["raw_trajectory_advantages"], expected_raw)
     torch.testing.assert_close(
         trajectory_advantages(advantages, response_mask),
-        4.0 * expected_raw,
+        2.0 * expected_raw,
     )
     torch.testing.assert_close(returns, advantages)
 
@@ -339,7 +342,7 @@ def test_efficient_reasoning_cost_uses_correct_response_length_statistics():
 def test_efficient_reasoning_cost_all_failure_group_has_zero_advantage():
     response_mask = make_response_mask([1, 4], width=4)
     advantages, returns, diagnostics = (
-        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
             token_level_rewards=make_token_rewards([0.0, 0.0], width=4),
             response_mask=response_mask,
             index=np.array(["prompt", "prompt"]),
@@ -350,14 +353,43 @@ def test_efficient_reasoning_cost_all_failure_group_has_zero_advantage():
 
     torch.testing.assert_close(advantages, torch.zeros_like(advantages))
     torch.testing.assert_close(returns, advantages)
-    torch.testing.assert_close(diagnostics["trajectory_costs"], torch.tensor([0.5, 0.5]))
+    expected_relative_lengths = torch.tensor([-1.0, 1.0])
+    torch.testing.assert_close(diagnostics["trajectory_costs"], torch.sigmoid(expected_relative_lengths))
+    torch.testing.assert_close(diagnostics["trajectory_relative_lengths"], expected_relative_lengths)
+    torch.testing.assert_close(diagnostics["group_length_means"], torch.tensor([2.5]))
+    torch.testing.assert_close(diagnostics["group_length_stds"], torch.tensor([1.5]))
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.zeros(1))
+
+
+def test_efficient_reasoning_cost_constant_length_group_uses_neutral_cost():
+    response_mask = make_response_mask([4, 4], width=4)
+    advantages, returns, diagnostics = (
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
+            token_level_rewards=make_token_rewards([1.0, 0.0], width=4),
+            response_mask=response_mask,
+            index=np.array(["prompt", "prompt"]),
+            expected_group_size=2,
+            return_diagnostics=True,
+        )
+    )
+
     torch.testing.assert_close(diagnostics["trajectory_relative_lengths"], torch.zeros(2))
-    assert not diagnostics["trajectory_cost_valid_mask"].any().item()
-    torch.testing.assert_close(diagnostics["group_correct_length_means"], torch.zeros(1))
-    torch.testing.assert_close(diagnostics["group_correct_length_stds"], torch.zeros(1))
+    torch.testing.assert_close(diagnostics["trajectory_costs"], torch.full((2,), 0.5))
+    torch.testing.assert_close(diagnostics["group_length_means"], torch.tensor([4.0]))
+    torch.testing.assert_close(diagnostics["group_length_stds"], torch.zeros(1))
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.ones(1))
+    torch.testing.assert_close(
+        diagnostics["raw_trajectory_advantages"],
+        torch.tensor([0.5, -0.25]),
+    )
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask),
+        torch.tensor([1.0, -0.5]),
+    )
+    torch.testing.assert_close(returns, advantages)
 
 
-def test_efficient_reasoning_cost_dispatch_logs_correct_only_metrics():
+def test_efficient_reasoning_cost_dispatch_logs_per_prompt_metrics():
     from verl import DataProto
     from verl.trainer.ppo.ray_trainer import compute_advantage
 
@@ -373,24 +405,34 @@ def test_efficient_reasoning_cost_dispatch_logs_correct_only_metrics():
 
     result = compute_advantage(
         data=data,
-        adv_estimator=AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
         num_repeat=4,
-        config={"efficient_reasoning_alpha": 0.1, "efficient_reasoning_epsilon": 1e-7},
+        config={"efficient_reasoning_epsilon": 1e-7},
     )
     metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
-    prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+    prefix = "fixed_n_rb_er_cost_marginrl"
+    expected_group_std = torch.tensor([2.0, 4.0, 6.0, 8.0]).std(unbiased=False).item()
+    expected_relative_lengths = (
+        torch.tensor([2.0, 4.0, 6.0, 8.0]) - 5.0
+    ) / (expected_group_std + 1e-7)
+    expected_costs = torch.sigmoid(expected_relative_lengths)
+    expected_failure_advantages = -4.0 * expected_costs[rewards == 0] / 3.0
 
     torch.testing.assert_close(
-        result.batch["advantages"][rewards == 0],
-        torch.zeros_like(result.batch["advantages"][rewards == 0]),
+        trajectory_advantages(result.batch["advantages"], response_mask)[rewards == 0],
+        expected_failure_advantages,
     )
-    assert metrics[f"{prefix}/relative_cost_alpha"] == pytest.approx(0.1)
-    assert metrics[f"{prefix}/correct_cost_count"] == 2
-    assert metrics[f"{prefix}/correct_cost_mean"] == pytest.approx(0.5)
-    assert metrics[f"{prefix}/correct_relative_length_mean"] == pytest.approx(0.0)
-    assert metrics[f"{prefix}/correct_relative_length_std"] == pytest.approx(1.0)
-    assert metrics[f"{prefix}/failure_advantage_abs_max"] == 0.0
-    assert metrics[f"{prefix}/q_hat_mean"] == pytest.approx(0.1)
+    assert metrics[f"{prefix}/group_length_mean_mean"] == pytest.approx(5.0)
+    assert metrics[f"{prefix}/group_length_std_mean"] == pytest.approx(expected_group_std)
+    assert metrics[f"{prefix}/relative_length_mean"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics[f"{prefix}/relative_length_std"] == pytest.approx(1.0)
+    assert metrics[f"{prefix}/cost_mean"] == pytest.approx(0.5)
+    assert metrics[f"{prefix}/failure_advantage_abs_max"] == pytest.approx(
+        (expected_costs[rewards == 0] / 3.0).max().item()
+    )
+    assert metrics[f"{prefix}/q_hat_mean"] == pytest.approx(1.0)
+    assert f"{prefix}/relative_cost_alpha" not in metrics
+    assert f"{prefix}/correct_cost_count" not in metrics
 
 
 def test_cost_scale_does_not_change_advantages():

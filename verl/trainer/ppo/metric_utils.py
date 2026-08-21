@@ -347,78 +347,38 @@ def compute_fixed_n_rb_cost_aware_marginrl_metrics(
 
 def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
     trajectory_relative_lengths: torch.Tensor,
-    trajectory_cost_valid_mask: torch.Tensor,
-    group_correct_length_means: torch.Tensor,
-    group_correct_length_stds: torch.Tensor,
-    group_relative_cost_alphas: torch.Tensor,
-    metric_prefix: str = "fixed_n_rb_er_cost_marginrl_success_gated",
+    group_length_means: torch.Tensor,
+    group_length_stds: torch.Tensor,
+    metric_prefix: str = "fixed_n_rb_er_cost_marginrl",
     **base_diagnostics,
 ) -> Dict[str, float]:
-    """Add correct-only Efficient-Reasoning cost statistics to fixed-N metrics."""
+    """Add per-prompt normalized-length statistics to fixed-N metrics."""
     metrics = compute_fixed_n_rb_cost_aware_marginrl_metrics(
         metric_prefix=metric_prefix,
         **base_diagnostics,
     )
     trajectory_costs = base_diagnostics["trajectory_costs"]
-    trajectory_lengths = base_diagnostics["trajectory_lengths"]
     group_success_counts = base_diagnostics["group_success_counts"]
     if trajectory_relative_lengths.shape != trajectory_costs.shape:
         raise ValueError("Efficient-Reasoning relative lengths must match trajectory costs")
-    if trajectory_cost_valid_mask.shape != trajectory_costs.shape:
-        raise ValueError("Efficient-Reasoning cost-valid mask must match trajectory costs")
-    group_tensors = (
-        group_correct_length_means,
-        group_correct_length_stds,
-        group_relative_cost_alphas,
-        group_success_counts,
-    )
+    group_tensors = (group_length_means, group_length_stds, group_success_counts)
     if any(tensor.shape != group_success_counts.shape for tensor in group_tensors):
         raise ValueError("Efficient-Reasoning group diagnostics must have matching shapes")
 
-    costs = trajectory_costs.detach().float()
-    lengths = trajectory_lengths.detach().float()
     relative_lengths = trajectory_relative_lengths.detach().float()
-    valid_mask = trajectory_cost_valid_mask.detach().bool()
-    success_group_mask = group_success_counts.detach().float() > 0
-    alphas = group_relative_cost_alphas.detach().float()
-
-    def selected_stats(values: torch.Tensor, mask: torch.Tensor) -> tuple[float, float, float, float]:
-        selected = values[mask]
-        if selected.numel() == 0:
-            return 0.0, 0.0, 0.0, 0.0
-        return (
-            selected.mean().item(),
-            selected.std(unbiased=False).item(),
-            selected.max().item(),
-            selected.min().item(),
-        )
-
-    correct_cost_stats = selected_stats(costs, valid_mask)
-    correct_length_stats = selected_stats(lengths, valid_mask)
-    correct_relative_length_stats = selected_stats(relative_lengths, valid_mask)
-    successful_group_mean_stats = selected_stats(group_correct_length_means.detach().float(), success_group_mask)
-    successful_group_std_stats = selected_stats(group_correct_length_stds.detach().float(), success_group_mask)
+    length_means = group_length_means.detach().float()
+    length_stds = group_length_stds.detach().float()
 
     metrics.update(
         {
-            f"{metric_prefix}/relative_cost_alpha": alphas.mean().item(),
-            f"{metric_prefix}/correct_cost_count": valid_mask.sum().item(),
-            f"{metric_prefix}/correct_cost_mean": correct_cost_stats[0],
-            f"{metric_prefix}/correct_cost_std": correct_cost_stats[1],
-            f"{metric_prefix}/correct_cost_max": correct_cost_stats[2],
-            f"{metric_prefix}/correct_cost_min": correct_cost_stats[3],
-            f"{metric_prefix}/correct_trajectory_tokens_mean": correct_length_stats[0],
-            f"{metric_prefix}/correct_trajectory_tokens_std": correct_length_stats[1],
-            f"{metric_prefix}/correct_trajectory_tokens_max": correct_length_stats[2],
-            f"{metric_prefix}/correct_trajectory_tokens_min": correct_length_stats[3],
-            f"{metric_prefix}/correct_relative_length_mean": correct_relative_length_stats[0],
-            f"{metric_prefix}/correct_relative_length_std": correct_relative_length_stats[1],
-            f"{metric_prefix}/correct_relative_length_max": correct_relative_length_stats[2],
-            f"{metric_prefix}/correct_relative_length_min": correct_relative_length_stats[3],
-            f"{metric_prefix}/group_correct_length_mean_mean": successful_group_mean_stats[0],
-            f"{metric_prefix}/group_correct_length_mean_std": successful_group_mean_stats[1],
-            f"{metric_prefix}/group_correct_length_std_mean": successful_group_std_stats[0],
-            f"{metric_prefix}/group_correct_length_std_std": successful_group_std_stats[1],
+            f"{metric_prefix}/relative_length_mean": relative_lengths.mean().item(),
+            f"{metric_prefix}/relative_length_std": relative_lengths.std(unbiased=False).item(),
+            f"{metric_prefix}/relative_length_max": relative_lengths.max().item(),
+            f"{metric_prefix}/relative_length_min": relative_lengths.min().item(),
+            f"{metric_prefix}/group_length_mean_mean": length_means.mean().item(),
+            f"{metric_prefix}/group_length_mean_std": length_means.std(unbiased=False).item(),
+            f"{metric_prefix}/group_length_std_mean": length_stds.mean().item(),
+            f"{metric_prefix}/group_length_std_std": length_stds.std(unbiased=False).item(),
         }
     )
     return metrics

@@ -214,33 +214,42 @@ an all-failure group has $A_i=-2\widetilde c_i$ and therefore retains a cost
 update. This is a fixed-rate ablation, not a same-batch estimate of
 $p/\mathbb E[c]$.
 
-## 6. Efficient-Reasoning relative cost with failures gated
+## 6. Fixed-$N$ RB estimator with Efficient-Reasoning sigmoid cost
 
-For each prompt, let $\mu_+$ and $\sigma_+$ be the population mean and standard
-deviation of the response lengths among its $M$ correct rollouts. The relative
-sigmoid cost for a correct rollout is
+This variant replaces the capped normalized cost from Section 4 with the
+Efficient-Reasoning length function. For each prompt group $g$, let $\mu_g$ and
+$\sigma_g$ be the population mean and standard deviation of the response
+lengths across all $N$ rollouts in that group. Every rollout receives cost
 
 \[
 c_i^{\rm ER}=\operatorname{sigmoid}\!\left(
-    \frac{L_i-\mu_+}{\sigma_++10^{-7}}
+    \frac{L_i-\mu_g}{\sigma_g+10^{-7}}
 \right).
 \]
 
-Using the Efficient-Reasoning coefficient $\alpha=0.1$, the raw trajectory
-advantage is
+The fixed-$N$ estimator still computes its detached, per-prompt plug-in rate
+from all $N$ costs,
+
+\[
+M_g=\sum_{i\in g}r_i,
+\qquad
+\widehat q_g=\frac{M_g}{\sum_{j\in g}c_j^{\rm ER}}.
+\]
+
+Its raw trajectory advantage is
 
 \[
 A_i^{\rm ER}=
 \begin{cases}
-\displaystyle \frac{1-\alpha c_i^{\rm ER}}{M},&r_i=1,\\[2mm]
-0,&r_i=0.
+\displaystyle \frac{1-\widehat q_g c_i^{\rm ER}}{M_g},&r_i=1,\\[2mm]
+\displaystyle -\frac{\widehat q_g c_i^{\rm ER}}{M_g+1},&r_i=0.
 \end{cases}
 \]
 
-The optimizer again receives $N A_i^{\rm ER}$. An all-failure group receives
-zero advantage. This is a success-gated relative-length ablation: $\alpha$ is
-the detached length-penalty coefficient, not an estimate of
-$p/\mathbb E[c]$.
+The optimizer again receives $N A_i^{\rm ER}$. An all-failure group has
+$\widehat q_g=0$ and receives zero advantage. Only the sigmoid length function
+is borrowed from Efficient Reasoning; there is no $\alpha$ coefficient in this
+variant, and the Fixed-$N$ RB plug-in estimate remains in use.
 
 ## Implementation map
 
@@ -253,7 +262,7 @@ $p/\mathbb E[c]$.
 | Fixed-$N$ RB, failures gated | `fixed_n_rb_cost_aware_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_marginrl_success_gated.sh` |
 | Fixed-$N$ RB, capped normalized cost | `fixed_n_rb_capped_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_marginrl.sh` |
 | Fixed-$N$ RB, capped cost and fixed $\widehat q$ | `fixed_n_rb_capped_fixed_q_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_fixed_q_marginrl.sh` |
-| Fixed-$N$, Efficient-Reasoning cost, failures gated | `fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_success_gated_marginrl.sh` |
+| Fixed-$N$ RB, Efficient-Reasoning cost | `fixed_n_rb_efficient_reasoning_cost_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_marginrl.sh` |
 
 The fixed-$N$ launchers use `seq-mean-token-sum`, five epochs, Math12K, and
 separate W&B experiment and checkpoint names. The original launcher keeps the

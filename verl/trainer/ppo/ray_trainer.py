@@ -339,7 +339,7 @@ def compute_advantage(
         AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
         AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
-        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
     ):
         calculation_mask = data.batch["response_mask"]
         trajectory_cost_mask = data.batch["response_mask"]
@@ -361,11 +361,11 @@ def compute_advantage(
         )
         efficient_reasoning_cost = (
             adv_estimator
-            == AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
+            == AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL
         )
         if efficient_reasoning_cost:
             advantage_fn = (
-                core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage
+                core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage
             )
         elif success_gated:
             advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage
@@ -385,7 +385,7 @@ def compute_advantage(
             return_diagnostics=True,
         )
         if efficient_reasoning_cost:
-            metric_prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+            metric_prefix = "fixed_n_rb_er_cost_marginrl"
         elif success_gated:
             metric_prefix = "fixed_n_rb_marginrl_success_gated"
         elif capped_fixed_q:
@@ -572,7 +572,7 @@ class RayPPOTrainer:
             AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
             AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
-            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
             AdvantageEstimator.PKPO,
             AdvantageEstimator.MACLAURIN,
             AdvantageEstimator.CROSS_FITTED_MACLAURIN,

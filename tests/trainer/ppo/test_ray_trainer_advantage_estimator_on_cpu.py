@@ -18,7 +18,7 @@ from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, Role
 
 
-def test_efficient_reasoning_success_gated_estimator_does_not_require_critic(monkeypatch):
+def test_efficient_reasoning_cost_estimator_does_not_require_critic(monkeypatch):
     monkeypatch.setattr(RayPPOTrainer, "_validate_config", lambda self: None)
     monkeypatch.setattr(RayPPOTrainer, "_create_dataloader", lambda self, *args: None)
     config = OmegaConf.create(
@@ -29,7 +29,7 @@ def test_efficient_reasoning_success_gated_estimator_does_not_require_critic(mon
             },
             "algorithm": {
                 "adv_estimator": (
-                    AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
+                    AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL
                 ),
                 "use_kl_in_reward": False,
             },

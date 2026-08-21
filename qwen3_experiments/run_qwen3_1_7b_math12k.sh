@@ -446,18 +446,16 @@ elif [[
     else
         echo "Capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=M/sum(cost)"
     fi
-elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated" ]]; then
+elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl" ]]; then
     if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
         echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
         exit 1
     fi
-    EFFICIENT_REASONING_ALPHA=${MAXRL_EFFICIENT_REASONING_ALPHA:-0.1}
     EFFICIENT_REASONING_EPSILON=${MAXRL_EFFICIENT_REASONING_EPSILON:-1e-7}
     ALGORITHM_OVERRIDES+=(
-        "algorithm.efficient_reasoning_alpha=${EFFICIENT_REASONING_ALPHA}"
         "algorithm.efficient_reasoning_epsilon=${EFFICIENT_REASONING_EPSILON}"
     )
-    echo "Efficient-Reasoning-cost success-gated fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, alpha=${EFFICIENT_REASONING_ALPHA}, normalization=correct responses per prompt, wrong-sample advantage=zero"
+    echo "Efficient-Reasoning sigmoid-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, normalization=all responses per prompt, q_hat=M/sum(cost), failure advantage=-q_hat*cost/(M+1)"
 elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated"
