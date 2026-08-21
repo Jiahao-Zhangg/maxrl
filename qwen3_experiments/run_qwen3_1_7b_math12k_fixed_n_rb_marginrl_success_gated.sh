@@ -36,7 +36,8 @@ case "$(uname -m)" in
 esac
 
 export MAXRL_ADVANTAGE_ESTIMATOR=fixed_n_rb_cost_aware_marginrl_success_gated
-export MAXRL_LOSS_AGG_MODE=seq-mean-token-sum
-export MAXRL_EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-fixed_n_rb_cost_aware_marginrl_success_gated_Qwen3-1.7B-Base_math12k}
+export MAXRL_LOSS_AGG_MODE=${MAXRL_LOSS_AGG_MODE:-token-mean}
+LOSS_AGG_TAG=${MAXRL_LOSS_AGG_MODE//-/_}
+export MAXRL_EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-fixed_n_rb_cost_aware_marginrl_success_gated_Qwen3-1.7B-Base_math12k_${LOSS_AGG_TAG}}
 
 exec "${SCRIPT_DIR}/run_qwen3_1_7b_math12k.sh" "$@"

@@ -456,7 +456,7 @@ def test_cost_scale_does_not_change_advantages():
     )
 
 
-def test_sequence_token_sum_and_group_scaling_match_theoretical_loss():
+def test_token_mean_preserves_group_gradient_with_inverse_mean_length_scale():
     response_mask = make_response_mask([2, 3, 5], width=5)
     _, _, diagnostics = compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
         token_level_rewards=make_token_rewards([1.0, 0.0, 1.0], width=5),
@@ -467,11 +467,14 @@ def test_sequence_token_sum_and_group_scaling_match_theoretical_loss():
     )
     token_terms = torch.arange(1, 16, dtype=torch.float32).reshape(3, 5)
     optimizer_loss_mat = diagnostics["optimizer_trajectory_advantages"].unsqueeze(-1) * token_terms
-    actual = agg_loss(optimizer_loss_mat, response_mask, "seq-mean-token-sum")
+    sequence_aggregated = agg_loss(optimizer_loss_mat, response_mask, "seq-mean-token-sum")
+    token_aggregated = agg_loss(optimizer_loss_mat, response_mask, "token-mean")
     sequence_sums = (token_terms * response_mask).sum(dim=-1)
-    expected = (diagnostics["raw_trajectory_advantages"] * sequence_sums).sum()
+    group_gradient = (diagnostics["raw_trajectory_advantages"] * sequence_sums).sum()
+    mean_response_length = response_mask.sum() / response_mask.shape[0]
 
-    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(sequence_aggregated, group_gradient)
+    torch.testing.assert_close(token_aggregated, group_gradient / mean_response_length)
 
 
 def test_dispatch_records_requested_and_applicable_wandb_metrics():

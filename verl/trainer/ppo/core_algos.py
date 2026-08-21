@@ -823,12 +823,13 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
     ``fixed_q_hat`` replaces the same-group plug-in estimate by that detached
     constant; this retains a cost update for all-failure groups.
 
-    The actor's ``seq-mean-token-sum`` aggregation averages over trajectories,
-    whereas the estimator sums over the fixed rollout group. We therefore
-    multiply raw coefficients by the group size before broadcasting them over
-    response tokens. This changes only the framework normalization, not the
-    per-prompt estimator. An all-failure group has ``q_hat == 0`` and receives
-    zero advantage.
+    Raw coefficients are multiplied by the fixed group size before being
+    broadcast over response tokens. With ``seq-mean-token-sum`` this directly
+    realizes the prompt-averaged group-sum estimator. The experiment launchers
+    default to ``token-mean`` to match original MaxRL; within each optimizer
+    microbatch that preserves the full trajectory scores and divides the
+    update by the microbatch's mean response length. An all-failure group has
+    ``q_hat == 0`` and receives zero advantage.
     """
     if response_mask.ndim != 2:
         raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
@@ -1094,9 +1095,11 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
     ``(1 - q_hat * c_i) / M`` and a failure receives
     ``-q_hat * c_i / (M + 1)``.
 
-    Multiplication by the fixed rollout count compensates for
-    ``seq-mean-token-sum`` actor-loss aggregation, as in the other fixed-N
-    estimators. All-failure groups have ``q_hat == 0`` and zero advantage.
+    As in the other fixed-N estimators, the raw coefficients are multiplied by
+    the fixed rollout count. The launchers default to ``token-mean`` to match
+    original MaxRL, producing an additional inverse-mean-response-length scale
+    within each optimizer microbatch. All-failure groups have ``q_hat == 0``
+    and zero advantage.
     """
     if config is not None:
         efficient_reasoning_epsilon = config.get("efficient_reasoning_epsilon", efficient_reasoning_epsilon)

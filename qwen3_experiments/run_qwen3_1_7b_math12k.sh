@@ -429,8 +429,8 @@ elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
 ]]; then
-    if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
-        echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
+    if [[ "${LOSS_AGG_MODE}" != "token-mean" && "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: ${ADVANTAGE_ESTIMATOR} supports token-mean or seq-mean-token-sum loss aggregation" >&2
         exit 1
     fi
     COST_REFERENCE_TOKENS=${MAXRL_COST_REFERENCE_TOKENS:-$((MAX_RESPONSE_LENGTH / 2))}
@@ -447,8 +447,8 @@ elif [[
         echo "Capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=M/sum(cost)"
     fi
 elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl" ]]; then
-    if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
-        echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
+    if [[ "${LOSS_AGG_MODE}" != "token-mean" && "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: ${ADVANTAGE_ESTIMATOR} supports token-mean or seq-mean-token-sum loss aggregation" >&2
         exit 1
     fi
     EFFICIENT_REASONING_EPSILON=${MAXRL_EFFICIENT_REASONING_EPSILON:-1e-7}
@@ -460,8 +460,8 @@ elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated"
 ]]; then
-    if [[ "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
-        echo "error: ${ADVANTAGE_ESTIMATOR} requires seq-mean-token-sum loss aggregation" >&2
+    if [[ "${LOSS_AGG_MODE}" != "token-mean" && "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: ${ADVANTAGE_ESTIMATOR} supports token-mean or seq-mean-token-sum loss aggregation" >&2
         exit 1
     fi
     if [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated" ]]; then

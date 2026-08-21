@@ -19,7 +19,18 @@ sequence-averaged convention
 
 Consequently, practical advantages contain a factor of $N$. Broadcasting
 $A_i$ over valid response tokens with `seq-mean-token-sum` realizes this
-gradient directly.
+gradient directly. The fixed-$N$ launchers now default to `token-mean` to
+match the original MaxRL runs. If an optimizer microbatch has mean valid
+response length $\bar L$, the policy-gradient contribution becomes
+
+\[
+\widehat g_{\rm token\text{-}mean}
+=\frac{1}{\bar L}\widehat g_{\rm seq\text{-}mean\text{-}token\text{-}sum}.
+\]
+
+Both modes retain the complete trajectory score $S_i$; `token-mean` adds a
+microbatch-dependent scale. Set
+`MAXRL_LOSS_AGG_MODE=seq-mean-token-sum` to recover the direct normalization.
 
 ## 1. Original MaxRL estimator
 
@@ -184,11 +195,14 @@ A_i^{\rm capped\text{-}RB}=
 \end{cases}
 \]
 
-The optimizer receives $N A_i^{\rm capped\text{-}RB}$ because training uses
-`seq-mean-token-sum`. With a 4096-token response limit, all responses of 512
-tokens or fewer have the same effective cost $1/4$. This removes the incentive
-to become progressively shorter inside that range while retaining cost
-pressure above it. If $M=0$, then $\widehat q=0$ and the group update is zero.
+The optimizer receives $N A_i^{\rm capped\text{-}RB}$ to preserve the fixed
+rollout-group convention. Under the default `token-mean` aggregation, the
+result is additionally divided by the optimizer microbatch's mean response
+length as described above. With a 4096-token response limit, all responses of
+512 tokens or fewer have the same effective cost $1/4$. This removes the
+incentive to become progressively shorter inside that range while retaining
+cost pressure above it. If $M=0$, then $\widehat q=0$ and the group update is
+zero.
 
 ## 5. Fixed-$N$ RB estimator with fixed $\widehat q=2$
 
@@ -264,9 +278,12 @@ variant, and the Fixed-$N$ RB plug-in estimate remains in use.
 | Fixed-$N$ RB, capped cost and fixed $\widehat q$ | `fixed_n_rb_capped_fixed_q_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_fixed_q_marginrl.sh` |
 | Fixed-$N$ RB, Efficient-Reasoning cost | `fixed_n_rb_efficient_reasoning_cost_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_marginrl.sh` |
 
-The fixed-$N$ launchers use `seq-mean-token-sum`, five epochs, Math12K, and
-separate W&B experiment and checkpoint names. The original launcher keeps the
-repository's `token-mean` default unless `MAXRL_LOSS_AGG_MODE` is set.
+The fixed-$N$ launchers default to `token-mean`, five epochs, and Math12K,
+matching the loss reduction used by original MaxRL and capped inverse-cost
+MaxRL. They also include the aggregation mode in their default W&B run and
+checkpoint names. `seq-mean-token-sum` remains available through
+`MAXRL_LOSS_AGG_MODE`; earlier fixed-$N$ checkpoints created before this
+configuration change used that mode.
 
 ## References
 
