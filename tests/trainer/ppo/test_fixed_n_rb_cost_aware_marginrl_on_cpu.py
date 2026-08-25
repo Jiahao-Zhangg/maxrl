@@ -25,6 +25,7 @@ from verl.trainer.ppo.core_algos import (
     compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage,
     compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage,
     compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage,
+    compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage,
 )
 
 
@@ -371,6 +372,54 @@ def test_efficient_reasoning_cost_supports_fixed_q_hat_without_gating_failures()
     torch.testing.assert_close(returns, advantages)
 
 
+def test_efficient_reasoning_success_gating_zeroes_only_failure_advantages():
+    response_mask = make_response_mask([2, 4, 6, 10], width=10)
+    rewards = make_token_rewards([1.0, 0.0, 0.0, 1.0], width=10)
+    kwargs = {
+        "token_level_rewards": rewards,
+        "response_mask": response_mask,
+        "index": np.array(["prompt"] * 4),
+        "expected_group_size": 4,
+        "return_diagnostics": True,
+    }
+    _, _, ungated_diagnostics = (
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(**kwargs)
+    )
+    advantages, returns, gated_diagnostics = (
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
+            **kwargs
+        )
+    )
+    success_mask = gated_diagnostics["trajectory_rewards"].bool()
+    failure_mask = ~success_mask
+
+    torch.testing.assert_close(
+        gated_diagnostics["trajectory_costs"], ungated_diagnostics["trajectory_costs"]
+    )
+    torch.testing.assert_close(
+        gated_diagnostics["group_q_hats"], ungated_diagnostics["group_q_hats"]
+    )
+    torch.testing.assert_close(
+        gated_diagnostics["raw_trajectory_advantages"][success_mask],
+        ungated_diagnostics["raw_trajectory_advantages"][success_mask],
+    )
+    torch.testing.assert_close(
+        gated_diagnostics["raw_trajectory_advantages"][failure_mask],
+        torch.zeros_like(gated_diagnostics["raw_trajectory_advantages"][failure_mask]),
+    )
+    torch.testing.assert_close(
+        gated_diagnostics["optimizer_trajectory_advantages"][failure_mask],
+        torch.zeros_like(
+            gated_diagnostics["optimizer_trajectory_advantages"][failure_mask]
+        ),
+    )
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask)[failure_mask],
+        torch.zeros_like(trajectory_advantages(advantages, response_mask)[failure_mask]),
+    )
+    torch.testing.assert_close(returns, advantages)
+
+
 def test_efficient_reasoning_cost_all_failure_group_has_zero_advantage():
     response_mask = make_response_mask([1, 4], width=4)
     advantages, returns, diagnostics = (
@@ -425,8 +474,75 @@ def test_efficient_reasoning_cost_dispatch_logs_per_prompt_metrics():
     from verl import DataProto
     from verl.trainer.ppo.ray_trainer import compute_advantage
 
+    lengths = torch.tensor([2.0, 4.0, 6.0, 8.0, 10.0, 12.0])
+    response_mask = make_response_mask(lengths.int().tolist(), width=12)
+    rewards = torch.tensor([0.0, 0.0, 1.0, 1.0, 1.0, 1.0])
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": make_token_rewards(rewards.tolist(), width=12),
+            "response_mask": response_mask,
+        },
+        non_tensors={"uid": np.array(["prompt"] * 6)},
+    )
+
+    result = compute_advantage(
+        data=data,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+        num_repeat=6,
+        config={"efficient_reasoning_epsilon": 1e-7},
+    )
+    metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
+    prefix = "fixed_n_rb_er_cost_marginrl"
+    expected_group_std = lengths.std(unbiased=False).item()
+    expected_relative_lengths = (lengths - lengths.mean()) / (expected_group_std + 1e-7)
+    expected_costs = torch.sigmoid(expected_relative_lengths)
+    expected_q_hat = rewards.sum() / expected_costs.sum()
+    expected_raw_advantages = torch.where(
+        rewards.bool(),
+        (1.0 - expected_q_hat * expected_costs) / rewards.sum(),
+        -expected_q_hat * expected_costs / (rewards.sum() + 1.0),
+    )
+
+    torch.testing.assert_close(
+        trajectory_advantages(result.batch["advantages"], response_mask),
+        6.0 * expected_raw_advantages,
+    )
+    assert metrics[f"{prefix}/group_length_mean_mean"] == pytest.approx(lengths.mean().item())
+    assert metrics[f"{prefix}/group_length_std_mean"] == pytest.approx(expected_group_std)
+    assert metrics[f"{prefix}/relative_length_mean"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics[f"{prefix}/relative_length_std"] == pytest.approx(1.0)
+    assert metrics[f"{prefix}/cost_mean"] == pytest.approx(0.5)
+    assert metrics[f"{prefix}/failure_advantage_abs_max"] == pytest.approx(
+        expected_raw_advantages[rewards == 0].abs().max().item()
+    )
+    assert metrics[f"{prefix}/q_hat_mean"] == pytest.approx(expected_q_hat.item())
+    assert metrics[f"{prefix}/early_eos_rate"] == pytest.approx(1.0 / 6.0)
+    assert metrics[f"{prefix}/early_eos_fail_rate"] == pytest.approx(0.5)
+    assert metrics[f"{prefix}/mean_len_fail"] == pytest.approx(3.0)
+    assert metrics[f"{prefix}/mean_len_success"] == pytest.approx(9.0)
+    expected_optimizer_advantages = 6.0 * expected_raw_advantages
+    assert metrics[f"{prefix}/adv_short_fail"] == pytest.approx(
+        expected_optimizer_advantages[0].item()
+    )
+    assert metrics[f"{prefix}/adv_normal_fail"] == pytest.approx(
+        expected_optimizer_advantages[1].item()
+    )
+    assert metrics[f"{prefix}/adv_success"] == pytest.approx(
+        expected_optimizer_advantages[rewards == 1].mean().item()
+    )
+    assert metrics[f"{prefix}/frac_negative_adv_success"] == pytest.approx(
+        (expected_optimizer_advantages[rewards == 1] < 0).float().mean().item()
+    )
+    assert f"{prefix}/relative_cost_alpha" not in metrics
+    assert f"{prefix}/correct_cost_count" not in metrics
+
+
+def test_efficient_reasoning_success_gated_dispatch_logs_early_eos_metrics():
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
     response_mask = make_response_mask([2, 4, 6, 8], width=8)
-    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
+    rewards = torch.tensor([0.0, 0.0, 1.0, 1.0])
     data = DataProto.from_dict(
         tensors={
             "token_level_rewards": make_token_rewards(rewards.tolist(), width=8),
@@ -437,34 +553,71 @@ def test_efficient_reasoning_cost_dispatch_logs_per_prompt_metrics():
 
     result = compute_advantage(
         data=data,
-        adv_estimator=AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+        adv_estimator=(
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
+        ),
         num_repeat=4,
         config={"efficient_reasoning_epsilon": 1e-7},
     )
     metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
-    prefix = "fixed_n_rb_er_cost_marginrl"
-    expected_group_std = torch.tensor([2.0, 4.0, 6.0, 8.0]).std(unbiased=False).item()
-    expected_relative_lengths = (
-        torch.tensor([2.0, 4.0, 6.0, 8.0]) - 5.0
-    ) / (expected_group_std + 1e-7)
-    expected_costs = torch.sigmoid(expected_relative_lengths)
-    expected_failure_advantages = -4.0 * expected_costs[rewards == 0] / 3.0
+    prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+    optimizer_advantages = trajectory_advantages(result.batch["advantages"], response_mask)
 
     torch.testing.assert_close(
-        trajectory_advantages(result.batch["advantages"], response_mask)[rewards == 0],
-        expected_failure_advantages,
+        optimizer_advantages[rewards == 0],
+        torch.zeros_like(optimizer_advantages[rewards == 0]),
     )
-    assert metrics[f"{prefix}/group_length_mean_mean"] == pytest.approx(5.0)
-    assert metrics[f"{prefix}/group_length_std_mean"] == pytest.approx(expected_group_std)
-    assert metrics[f"{prefix}/relative_length_mean"] == pytest.approx(0.0, abs=1e-7)
-    assert metrics[f"{prefix}/relative_length_std"] == pytest.approx(1.0)
-    assert metrics[f"{prefix}/cost_mean"] == pytest.approx(0.5)
-    assert metrics[f"{prefix}/failure_advantage_abs_max"] == pytest.approx(
-        (expected_costs[rewards == 0] / 3.0).max().item()
+    assert metrics[f"{prefix}/early_eos_rate"] == pytest.approx(0.25)
+    assert metrics[f"{prefix}/early_eos_fail_rate"] == pytest.approx(0.5)
+    assert metrics[f"{prefix}/mean_len_fail"] == pytest.approx(3.0)
+    assert metrics[f"{prefix}/mean_len_success"] == pytest.approx(7.0)
+    assert metrics[f"{prefix}/adv_short_fail"] == pytest.approx(0.0)
+    assert metrics[f"{prefix}/adv_normal_fail"] == pytest.approx(0.0)
+    assert metrics[f"{prefix}/adv_success"] == pytest.approx(
+        optimizer_advantages[rewards == 1].mean().item()
     )
-    assert metrics[f"{prefix}/q_hat_mean"] == pytest.approx(1.0)
-    assert f"{prefix}/relative_cost_alpha" not in metrics
-    assert f"{prefix}/correct_cost_count" not in metrics
+    assert metrics[f"{prefix}/frac_negative_adv_success"] == pytest.approx(
+        (optimizer_advantages[rewards == 1] < 0).float().mean().item()
+    )
+    assert "fixed_n_rb_er_cost_marginrl/early_eos_rate" not in metrics
+
+
+@pytest.mark.parametrize(
+    ("rewards", "empty_subset_metrics"),
+    [
+        (
+            [1.0, 1.0],
+            ["early_eos_fail_rate", "mean_len_fail", "adv_short_fail", "adv_normal_fail"],
+        ),
+        ([0.0, 0.0], ["mean_len_success", "adv_success", "frac_negative_adv_success"]),
+    ],
+)
+def test_efficient_reasoning_early_eos_metrics_zero_empty_subsets(
+    rewards: list[float], empty_subset_metrics: list[str]
+):
+    from verl import DataProto
+    from verl.trainer.ppo.ray_trainer import compute_advantage
+
+    response_mask = make_response_mask([2, 4], width=4)
+    data = DataProto.from_dict(
+        tensors={
+            "token_level_rewards": make_token_rewards(rewards, width=4),
+            "response_mask": response_mask,
+        },
+        non_tensors={"uid": np.array(["prompt", "prompt"])},
+    )
+
+    result = compute_advantage(
+        data=data,
+        adv_estimator=AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+        num_repeat=2,
+        config={"efficient_reasoning_epsilon": 1e-7},
+    )
+    metrics = result.meta_info["fixed_n_rb_marginrl_metrics"]
+    prefix = "fixed_n_rb_er_cost_marginrl"
+
+    for metric_name in empty_subset_metrics:
+        assert metrics[f"{prefix}/{metric_name}"] == pytest.approx(0.0)
 
 
 def test_cost_scale_does_not_change_advantages():

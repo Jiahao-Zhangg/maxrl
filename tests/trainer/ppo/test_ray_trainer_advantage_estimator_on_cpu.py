@@ -12,13 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 from omegaconf import OmegaConf
 
 from verl.trainer.ppo.core_algos import AdvantageEstimator
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, Role
 
 
-def test_efficient_reasoning_cost_estimator_does_not_require_critic(monkeypatch):
+@pytest.mark.parametrize(
+    "adv_estimator",
+    [
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+    ],
+)
+def test_efficient_reasoning_cost_estimator_does_not_require_critic(
+    monkeypatch, adv_estimator
+):
     monkeypatch.setattr(RayPPOTrainer, "_validate_config", lambda self: None)
     monkeypatch.setattr(RayPPOTrainer, "_create_dataloader", lambda self, *args: None)
     config = OmegaConf.create(
@@ -28,9 +38,7 @@ def test_efficient_reasoning_cost_estimator_does_not_require_critic(monkeypatch)
                 "model": {"lora_rank": 0},
             },
             "algorithm": {
-                "adv_estimator": (
-                    AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL
-                ),
+                "adv_estimator": adv_estimator,
                 "use_kl_in_reward": False,
             },
         }

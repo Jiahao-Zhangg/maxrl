@@ -401,11 +401,14 @@ CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.2
 GRAD_CLIP=0.3
 KL_COEFF=0.0
-TOTAL_EPOCHS=5
+TOTAL_EPOCHS=${MAXRL_TOTAL_EPOCHS:-5}
+TOTAL_TRAINING_STEPS=${MAXRL_TOTAL_TRAINING_STEPS:-}
+SAVE_FREQ=${MAXRL_SAVE_FREQ:-50}
+TEST_FREQ=${MAXRL_TEST_FREQ:-50}
 LOSS_AGG_MODE=${MAXRL_LOSS_AGG_MODE:-token-mean}
 
-MODEL_PATH=Qwen/Qwen3-1.7B-Base
-MODEL_NAME=Qwen3-1.7B-Base
+MODEL_PATH=${MAXRL_MODEL_PATH:-Qwen/Qwen3-1.7B-Base}
+MODEL_NAME=${MAXRL_MODEL_NAME:-Qwen3-1.7B-Base}
 ADVANTAGE_ESTIMATOR=${MAXRL_ADVANTAGE_ESTIMATOR:-maxrl}
 PROJECT_NAME=${MAXRL_PROJECT_NAME:-Qwen3_MaxRL_Experiments}
 EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-${ADVANTAGE_ESTIMATOR}_${MODEL_NAME}_math12k}
@@ -457,6 +460,14 @@ if [[ "${SAVE_ROLLOUT_DATASET}" == true ]]; then
 fi
 
 ALGORITHM_OVERRIDES=()
+TRAINER_OVERRIDES=()
+if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
+    if [[ ! "${TOTAL_TRAINING_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "error: MAXRL_TOTAL_TRAINING_STEPS must be a positive integer" >&2
+        exit 2
+    fi
+    TRAINER_OVERRIDES+=("trainer.total_training_steps=${TOTAL_TRAINING_STEPS}")
+fi
 if [[ "${ADVANTAGE_ESTIMATOR}" == "cost_aware_maxrl" ]]; then
     COST_REFERENCE_TOKENS=${MAXRL_COST_REFERENCE_TOKENS:-$((MAX_RESPONSE_LENGTH / 2))}
     MAX_INVERSE_COST=${MAXRL_MAX_INVERSE_COST:-4.0}
@@ -490,15 +501,20 @@ elif [[
     else
         echo "Capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=M/sum(cost)"
     fi
-elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl" ]]; then
+elif [[
+    "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl"
+    || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated"
+]]; then
     if [[ "${LOSS_AGG_MODE}" != "token-mean" && "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
         echo "error: ${ADVANTAGE_ESTIMATOR} supports token-mean or seq-mean-token-sum loss aggregation" >&2
         exit 1
     fi
     EFFICIENT_REASONING_EPSILON=${MAXRL_EFFICIENT_REASONING_EPSILON:-1e-7}
     EFFICIENT_REASONING_FIXED_Q_HAT=${MAXRL_EFFICIENT_REASONING_FIXED_Q_HAT:-}
+    SAVE_SHORTEST_ROLLOUT=${MAXRL_SAVE_SHORTEST_ROLLOUT:-false}
     ALGORITHM_OVERRIDES+=(
         "algorithm.efficient_reasoning_epsilon=${EFFICIENT_REASONING_EPSILON}"
+        "algorithm.save_shortest_rollout=${SAVE_SHORTEST_ROLLOUT}"
     )
     if [[ -n "${EFFICIENT_REASONING_FIXED_Q_HAT}" ]]; then
         ALGORITHM_OVERRIDES+=(
@@ -508,7 +524,14 @@ elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginr
     else
         Q_HAT_DESCRIPTION="M/sum(cost)"
     fi
-    echo "Efficient-Reasoning sigmoid-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, normalization=all responses per prompt, q_hat=${Q_HAT_DESCRIPTION}, failure advantage=-q_hat*cost/(M+1)"
+    if [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated" ]]; then
+        echo "Success-gated Efficient-Reasoning sigmoid-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, normalization=all responses per prompt, q_hat=${Q_HAT_DESCRIPTION}, wrong-sample advantage=zero"
+    else
+        echo "Efficient-Reasoning sigmoid-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, normalization=all responses per prompt, q_hat=${Q_HAT_DESCRIPTION}, failure advantage=-q_hat*cost/(M+1)"
+    fi
+    if [[ "${SAVE_SHORTEST_ROLLOUT}" == "true" ]]; then
+        echo "Shortest-rollout log: ${CHECKPOINT_SAVE_PATH}/debug/shortest_rollouts.jsonl"
+    fi
 elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated"
@@ -524,7 +547,11 @@ elif [[
     fi
 fi
 
-echo "Training ${MODEL_NAME} with hiyouga/math12k for ${TOTAL_EPOCHS} epochs"
+if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
+    echo "Training ${MODEL_NAME} with hiyouga/math12k for exactly ${TOTAL_TRAINING_STEPS} steps (epoch ceiling: ${TOTAL_EPOCHS})"
+else
+    echo "Training ${MODEL_NAME} with hiyouga/math12k for ${TOTAL_EPOCHS} epochs"
+fi
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "Advantage estimator: ${ADVANTAGE_ESTIMATOR}; loss aggregation: ${LOSS_AGG_MODE}"
 echo "Checkpoints: ${CHECKPOINT_SAVE_PATH}"
@@ -587,11 +614,12 @@ python -W ignore -m verl.trainer.main_ppo \
     trainer.default_local_dir="${CHECKPOINT_SAVE_PATH}" \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
+    trainer.save_freq="${SAVE_FREQ}" \
     trainer.max_actor_ckpt_to_keep=400 \
     trainer.max_critic_ckpt_to_keep=400 \
-    trainer.test_freq=50 \
+    trainer.test_freq="${TEST_FREQ}" \
     trainer.total_epochs="${TOTAL_EPOCHS}" \
+    "${TRAINER_OVERRIDES[@]}" \
     ray_init.ray_dir="${MAXRL_RAY_DIR}" \
     "${ROLLOUT_DATASET_OVERRIDES[@]}" \
     "$@"

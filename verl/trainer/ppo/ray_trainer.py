@@ -341,6 +341,7 @@ def compute_advantage(
         AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
     ):
         calculation_mask = data.batch["response_mask"]
         trajectory_cost_mask = data.batch["response_mask"]
@@ -360,11 +361,19 @@ def compute_advantage(
             adv_estimator
             == AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL
         )
-        efficient_reasoning_cost = (
+        efficient_reasoning_success_gated = (
             adv_estimator
-            == AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL
+            == AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
         )
-        if efficient_reasoning_cost:
+        efficient_reasoning_cost = adv_estimator in (
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+        )
+        if efficient_reasoning_success_gated:
+            advantage_fn = (
+                core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage
+            )
+        elif efficient_reasoning_cost:
             advantage_fn = (
                 core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage
             )
@@ -385,7 +394,9 @@ def compute_advantage(
             config=config,
             return_diagnostics=True,
         )
-        if efficient_reasoning_cost:
+        if efficient_reasoning_success_gated:
+            metric_prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+        elif efficient_reasoning_cost:
             metric_prefix = "fixed_n_rb_er_cost_marginrl"
         elif success_gated:
             metric_prefix = "fixed_n_rb_marginrl_success_gated"
@@ -500,6 +511,83 @@ def compute_advantage(
     return data
 
 
+def build_shortest_rollout_record(
+    data: DataProto,
+    tokenizer,
+    global_step: int,
+) -> dict[str, object]:
+    """Build a deterministic record for the globally shortest rollout."""
+    required_batch_keys = {
+        "prompts",
+        "responses",
+        "attention_mask",
+        "response_mask",
+        "token_level_scores",
+    }
+    missing_keys = required_batch_keys.difference(data.batch.keys())
+    if missing_keys:
+        raise ValueError(
+            "shortest-rollout logging requires batch keys "
+            f"{sorted(missing_keys)}"
+        )
+
+    prompts = data.batch["prompts"]
+    responses = data.batch["responses"]
+    attention_mask = data.batch["attention_mask"].bool()
+    response_mask = data.batch["response_mask"].bool()
+    token_level_scores = data.batch["token_level_scores"]
+    batch_size = responses.shape[0]
+    if batch_size == 0:
+        raise ValueError("shortest-rollout logging requires at least one rollout")
+    if any(tensor.shape[0] != batch_size for tensor in (prompts, attention_mask, response_mask, token_level_scores)):
+        raise ValueError("shortest-rollout batch tensors must have matching batch dimensions")
+    if response_mask.shape != responses.shape:
+        raise ValueError("shortest-rollout responses and response mask must have matching shapes")
+    if attention_mask.shape[1] < prompts.shape[1]:
+        raise ValueError("shortest-rollout attention mask is shorter than the prompt tensor")
+
+    response_lengths = response_mask.sum(dim=-1)
+    shortest_position = int(torch.argmin(response_lengths).item())
+    prompt_mask = attention_mask[:, : prompts.shape[1]]
+    prompt_token_ids = prompts[shortest_position][prompt_mask[shortest_position]]
+    response_token_ids = responses[shortest_position][response_mask[shortest_position]]
+    score = token_level_scores[shortest_position].detach().float().sum()
+    correct = torch.isclose(
+        score,
+        score.new_tensor(1.0),
+        rtol=0.0,
+        atol=1e-6,
+    ).item()
+
+    prompt_uids = data.non_tensor_batch.get("uid")
+    prompt_uid = None if prompt_uids is None else str(prompt_uids[shortest_position])
+    return {
+        "global_step": int(global_step),
+        "batch_position": shortest_position,
+        "prompt_uid": prompt_uid,
+        "prompt": tokenizer.decode(
+            prompt_token_ids.detach().cpu().tolist(), skip_special_tokens=True
+        ),
+        "response": tokenizer.decode(
+            response_token_ids.detach().cpu().tolist(), skip_special_tokens=True
+        ),
+        "response_tokens": int(response_lengths[shortest_position].item()),
+        "reward": float(score.item()),
+        "correct": bool(correct),
+    }
+
+
+def append_shortest_rollout_record(filename: str, record: dict[str, object]) -> None:
+    """Append one shortest-rollout record to a driver-owned JSONL file."""
+    parent_dir = os.path.dirname(filename)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    with open(filename, "a", encoding="utf-8") as output_file:
+        output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        output_file.flush()
+        os.fsync(output_file.fileno())
+
+
 class RayPPOTrainer:
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -574,6 +662,7 @@ class RayPPOTrainer:
             AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
             AdvantageEstimator.PKPO,
             AdvantageEstimator.MACLAURIN,
             AdvantageEstimator.CROSS_FITTED_MACLAURIN,
@@ -911,6 +1000,22 @@ class RayPPOTrainer:
         self.rollout_dataset_url = dataset_url
         print(f"Verified rollout dataset upload: {dataset_url}")
         return dataset_url
+
+    def _save_shortest_rollout(self, batch: DataProto) -> str:
+        """Append the globally shortest rollout for this training step."""
+        filename = os.path.join(
+            self.config.trainer.default_local_dir,
+            "debug",
+            "shortest_rollouts.jsonl",
+        )
+        record = build_shortest_rollout_record(
+            data=batch,
+            tokenizer=self.tokenizer,
+            global_step=self.global_steps,
+        )
+        record["experiment_name"] = str(self.config.trainer.experiment_name)
+        append_shortest_rollout_record(filename, record)
+        return filename
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -2092,6 +2197,14 @@ class RayPPOTrainer:
                         fixed_n_rb_marginrl_metrics = batch.meta_info.pop("fixed_n_rb_marginrl_metrics", None)
                         if fixed_n_rb_marginrl_metrics is not None:
                             metrics.update(fixed_n_rb_marginrl_metrics)
+                        if self.config.algorithm.get("save_shortest_rollout", False):
+                            try:
+                                self._save_shortest_rollout(batch)
+                            except Exception as error:
+                                print(
+                                    "Failed to save the globally shortest rollout "
+                                    f"at step {self.global_steps}: {error}"
+                                )
 
                     # update critic
                     if self.use_critic:

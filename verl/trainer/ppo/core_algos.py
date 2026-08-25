@@ -131,6 +131,9 @@ class AdvantageEstimator(str, Enum):
     FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL = "fixed_n_rb_capped_cost_aware_marginrl"
     FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL = "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
     FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL = "fixed_n_rb_efficient_reasoning_cost_marginrl"
+    FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED = (
+        "fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated"
+    )
     PKPO = "pkpo"
     MACLAURIN = "maclaurin"
     MACLAURIN_BASELINE = "maclaurin_baseline"
@@ -1084,6 +1087,7 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
     config=None,
     efficient_reasoning_epsilon: float = 1e-7,
     efficient_reasoning_fixed_q_hat: Optional[float] = None,
+    success_gated: bool = False,
     return_diagnostics: bool = False,
     **kwargs,
 ):
@@ -1095,7 +1099,10 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
     ``q_hat = M / sum_i c_i`` by default. Supplying
     ``efficient_reasoning_fixed_q_hat`` replaces it with that detached
     constant. A success receives raw coefficient ``(1 - q_hat * c_i) / M``
-    and a failure receives ``-q_hat * c_i / (M + 1)``.
+    and a failure normally receives
+    ``-q_hat * c_i / (M + 1)``. If ``success_gated`` is true, every failure
+    receives zero instead while the costs, rate estimate, and success branch
+    remain unchanged.
 
     As in the other fixed-N estimators, the raw coefficients are multiplied by
     the fixed rollout count. The launchers default to ``token-mean`` to match
@@ -1133,6 +1140,7 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
         inverse_cost_cap_mask=torch.zeros_like(trajectory_costs, dtype=torch.bool),
         expected_group_size=expected_group_size,
         fixed_q_hat=efficient_reasoning_fixed_q_hat,
+        success_gated=success_gated,
         return_diagnostics=True,
         **kwargs,
     )
@@ -1146,6 +1154,31 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
     if return_diagnostics:
         return advantages, returns, diagnostics
     return advantages, returns
+
+
+@register_adv_est(
+    AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
+)
+def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute Efficient-Reasoning fixed-N RB advantages with failures gated."""
+    return compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_cost_mask=trajectory_cost_mask,
+        expected_group_size=expected_group_size,
+        success_gated=True,
+        return_diagnostics=return_diagnostics,
+        **kwargs,
+    )
 
 
 @register_adv_est(AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED)

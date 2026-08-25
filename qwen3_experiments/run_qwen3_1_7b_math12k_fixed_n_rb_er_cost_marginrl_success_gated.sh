@@ -36,11 +36,11 @@ case "$(uname -m)" in
         ;;
 esac
 
-export MAXRL_ADVANTAGE_ESTIMATOR=fixed_n_rb_efficient_reasoning_cost_marginrl
+export MAXRL_ADVANTAGE_ESTIMATOR=fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated
 export MAXRL_LOSS_AGG_MODE=${MAXRL_LOSS_AGG_MODE:-token-mean}
 LOSS_AGG_TAG=${MAXRL_LOSS_AGG_MODE//-/_}
 export MAXRL_EFFICIENT_REASONING_EPSILON=${MAXRL_EFFICIENT_REASONING_EPSILON:-1e-7}
 export MAXRL_SAVE_SHORTEST_ROLLOUT=${MAXRL_SAVE_SHORTEST_ROLLOUT:-true}
-export MAXRL_EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-fixed_n_rb_er_cost_marginrl_Qwen3-1.7B-Base_math12k_${LOSS_AGG_TAG}}
+export MAXRL_EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-fixed_n_rb_er_cost_marginrl_success_gated_Qwen3-1.7B-Base_math12k_${LOSS_AGG_TAG}}
 
 exec "${SCRIPT_DIR}/run_qwen3_1_7b_math12k.sh" "$@"

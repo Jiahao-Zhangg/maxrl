@@ -265,6 +265,77 @@ $\widehat q_g=0$ and receives zero advantage. Only the sigmoid length function
 is borrowed from Efficient Reasoning; there is no $\alpha$ coefficient in this
 variant, and the Fixed-$N$ RB plug-in estimate remains in use.
 
+The success-gated Efficient-Reasoning variant keeps the same costs,
+$\widehat q_g$, and successful-response branch, but assigns every wrong answer
+zero raw advantage:
+
+\[
+A_i^{\rm ER\text{-}gated}=
+\begin{cases}
+\displaystyle \frac{1-\widehat q_g c_i^{\rm ER}}{M_g},&r_i=1,\\[2mm]
+0,&r_i=0.
+\end{cases}
+\]
+
+Its optimizer advantage is $N A_i^{\rm ER\text{-}gated}$. In particular,
+wrong answers remain exactly zero after the fixed-$N$ multiplier.
+
+### Training metrics for early-EOS debugging
+
+Both Efficient-Reasoning fixed-$N$ variants log the following W&B keys. The
+standard variant uses the prefix `fixed_n_rb_er_cost_marginrl/`; the gated
+variant uses `fixed_n_rb_er_cost_marginrl_success_gated/`. Here $A_i$ is the
+detached trajectory advantage supplied to PPO, including the fixed-rollout
+multiplier:
+
+\[
+A_i=A_i^{\rm optimizer}=N A_i^{\rm raw},
+\]
+
+\[
+\begin{aligned}
+\mathrm{early\_eos\_rate}
+&=\frac1B\sum_i\mathbf1[L_i\le2],\\
+\mathrm{early\_eos\_fail\_rate}
+&=\frac{\sum_i\mathbf1[r_i=0,L_i\le2]}
+        {\sum_i\mathbf1[r_i=0]},\\
+\mathrm{mean\_len\_fail}
+&=\frac{\sum_i(1-r_i)L_i}{\sum_i(1-r_i)},\\
+\mathrm{mean\_len\_success}
+&=\frac{\sum_i r_iL_i}{\sum_i r_i},\\
+\mathrm{adv\_short\_fail}
+&=\frac{\sum_iA_i\mathbf1[r_i=0,L_i\le2]}
+        {\sum_i\mathbf1[r_i=0,L_i\le2]},\\
+\mathrm{adv\_normal\_fail}
+&=\frac{\sum_iA_i\mathbf1[r_i=0,L_i>2]}
+        {\sum_i\mathbf1[r_i=0,L_i>2]},\\
+\mathrm{adv\_success}
+&=\frac{\sum_iA_i\mathbf1[r_i=1]}{\sum_i\mathbf1[r_i=1]},\\
+\mathrm{frac\_negative\_adv\_success}
+&=\frac{\sum_i\mathbf1[r_i=1,A_i<0]}{\sum_i\mathbf1[r_i=1]}.
+\end{aligned}
+\]
+
+Metrics conditioned on an empty subset are logged as `0.0`. The characteristic
+early-EOS failure pattern is
+$\mathrm{adv\_short\_fail}\approx0$ while
+$\mathrm{adv\_normal\_fail}\ll0$, together with a rising
+$\mathrm{early\_eos\_fail\_rate}$ and falling
+$\mathrm{mean\_len\_fail}$. For the success-gated variant,
+`adv_short_fail` and `adv_normal_fail` should both remain exactly zero; the
+length and EOS metrics still reveal whether failed generations are collapsing.
+
+### Shortest-rollout trace
+
+Both Efficient-Reasoning launchers also append the globally shortest response
+from every training round to
+`<checkpoint_dir>/debug/shortest_rollouts.jsonl`. Each JSON object contains the
+training step, batch position, prompt UID and decoded prompt, decoded response,
+response-token count, scalar grader reward, and binary correctness. Selection
+is over the complete driver batch; equal-length responses are resolved by the
+first batch position. Set `MAXRL_SAVE_SHORTEST_ROLLOUT=false` to disable this
+trace for an ER launch.
+
 ## Implementation map
 
 | Estimator | Registered name | Launcher |
@@ -277,6 +348,7 @@ variant, and the Fixed-$N$ RB plug-in estimate remains in use.
 | Fixed-$N$ RB, capped normalized cost | `fixed_n_rb_capped_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_marginrl.sh` |
 | Fixed-$N$ RB, capped cost and fixed $\widehat q$ | `fixed_n_rb_capped_fixed_q_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_fixed_q_marginrl.sh` |
 | Fixed-$N$ RB, Efficient-Reasoning cost | `fixed_n_rb_efficient_reasoning_cost_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_marginrl.sh` |
+| Fixed-$N$ RB, Efficient-Reasoning cost, failures gated | `fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_marginrl_success_gated.sh` |
 
 The fixed-$N$ launchers default to `token-mean`, five epochs, and Math12K,
 matching the loss reduction used by original MaxRL and capped inverse-cost

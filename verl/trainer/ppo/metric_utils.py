@@ -358,6 +358,9 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
         **base_diagnostics,
     )
     trajectory_costs = base_diagnostics["trajectory_costs"]
+    trajectory_lengths = base_diagnostics["trajectory_lengths"]
+    trajectory_rewards = base_diagnostics["trajectory_rewards"]
+    optimizer_trajectory_advantages = base_diagnostics["optimizer_trajectory_advantages"]
     group_success_counts = base_diagnostics["group_success_counts"]
     if trajectory_relative_lengths.shape != trajectory_costs.shape:
         raise ValueError("Efficient-Reasoning relative lengths must match trajectory costs")
@@ -368,6 +371,23 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
     relative_lengths = trajectory_relative_lengths.detach().float()
     length_means = group_length_means.detach().float()
     length_stds = group_length_stds.detach().float()
+    lengths = trajectory_lengths.detach().float()
+    rewards = trajectory_rewards.detach().float()
+    optimizer_advantages = optimizer_trajectory_advantages.detach().float()
+
+    binary_reward_mask = (rewards == 0) | (rewards == 1)
+    if not binary_reward_mask.all().item():
+        raise ValueError("Efficient-Reasoning early-EOS metrics require binary trajectory rewards")
+
+    def masked_mean_or_zero(values: torch.Tensor, mask: torch.Tensor) -> float:
+        selected = values[mask]
+        return selected.mean().item() if selected.numel() > 0 else 0.0
+
+    early_eos_mask = lengths <= 2
+    failure_mask = rewards == 0
+    success_mask = rewards == 1
+    short_failure_mask = failure_mask & early_eos_mask
+    normal_failure_mask = failure_mask & ~early_eos_mask
 
     metrics.update(
         {
@@ -379,6 +399,26 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
             f"{metric_prefix}/group_length_mean_std": length_means.std(unbiased=False).item(),
             f"{metric_prefix}/group_length_std_mean": length_stds.mean().item(),
             f"{metric_prefix}/group_length_std_std": length_stds.std(unbiased=False).item(),
+            # Advantage diagnostics use the fixed-N-scaled trajectory values
+            # supplied to PPO, not the raw estimator coefficients.
+            f"{metric_prefix}/early_eos_rate": early_eos_mask.float().mean().item(),
+            f"{metric_prefix}/early_eos_fail_rate": masked_mean_or_zero(
+                early_eos_mask.float(), failure_mask
+            ),
+            f"{metric_prefix}/mean_len_fail": masked_mean_or_zero(lengths, failure_mask),
+            f"{metric_prefix}/mean_len_success": masked_mean_or_zero(lengths, success_mask),
+            f"{metric_prefix}/adv_short_fail": masked_mean_or_zero(
+                optimizer_advantages, short_failure_mask
+            ),
+            f"{metric_prefix}/adv_normal_fail": masked_mean_or_zero(
+                optimizer_advantages, normal_failure_mask
+            ),
+            f"{metric_prefix}/adv_success": masked_mean_or_zero(
+                optimizer_advantages, success_mask
+            ),
+            f"{metric_prefix}/frac_negative_adv_success": masked_mean_or_zero(
+                (optimizer_advantages < 0).float(), success_mask
+            ),
         }
     )
     return metrics
