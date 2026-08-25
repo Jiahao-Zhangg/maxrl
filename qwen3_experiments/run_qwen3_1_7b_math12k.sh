@@ -412,6 +412,50 @@ EXPERIMENT_NAME=${MAXRL_EXPERIMENT_NAME:-${ADVANTAGE_ESTIMATOR}_${MODEL_NAME}_ma
 CHECKPOINT_SAVE_PATH=${MAXRL_OUTPUT_DIR}/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}
 TEST_DATASET_PATH="['${AIME25_DIR}/test.parquet','${MATH500_DIR}/test.parquet']"
 
+SAVE_ROLLOUT_DATASET=${MAXRL_SAVE_ROLLOUT_DATASET:-0}
+case "${SAVE_ROLLOUT_DATASET,,}" in
+    1|true|yes)
+        SAVE_ROLLOUT_DATASET=true
+        ;;
+    0|false|no)
+        SAVE_ROLLOUT_DATASET=false
+        ;;
+    *)
+        die "MAXRL_SAVE_ROLLOUT_DATASET must be 0/1, false/true, or no/yes"
+        ;;
+esac
+
+ROLLOUT_DATASET_OVERRIDES=()
+if [[ "${SAVE_ROLLOUT_DATASET}" == true ]]; then
+    ROLLOUT_DATASET_HF_REPO=${MAXRL_ROLLOUT_DATASET_HF_REPO:-}
+    [[ "${ROLLOUT_DATASET_HF_REPO}" =~ ^[^/]+/[^/]+$ ]] || \
+        die "MAXRL_ROLLOUT_DATASET_HF_REPO must have the form owner/name"
+    ROLLOUT_DATASET_DIR=${MAXRL_ROLLOUT_DATASET_DIR:-${MAXRL_OUTPUT_DIR}/rollouts/${PROJECT_NAME}/${EXPERIMENT_NAME}}
+    ROLLOUT_DATASET_PRIVATE=${MAXRL_ROLLOUT_DATASET_PRIVATE:-0}
+    case "${ROLLOUT_DATASET_PRIVATE,,}" in
+        1|true|yes)
+            ROLLOUT_DATASET_PRIVATE=true
+            ;;
+        0|false|no)
+            ROLLOUT_DATASET_PRIVATE=false
+            ;;
+        *)
+            die "MAXRL_ROLLOUT_DATASET_PRIVATE must be 0/1, false/true, or no/yes"
+            ;;
+    esac
+    ROLLOUT_DATASET_UPLOAD_WORKERS=${MAXRL_ROLLOUT_DATASET_UPLOAD_WORKERS:-4}
+    [[ "${ROLLOUT_DATASET_UPLOAD_WORKERS}" =~ ^[1-9][0-9]*$ ]] || \
+        die "MAXRL_ROLLOUT_DATASET_UPLOAD_WORKERS must be a positive integer"
+    ROLLOUT_DATASET_OVERRIDES+=(
+        "trainer.rollout_dataset.enabled=true"
+        "trainer.rollout_dataset.local_dir=${ROLLOUT_DATASET_DIR}"
+        "trainer.rollout_dataset.hub_repo_id=${ROLLOUT_DATASET_HF_REPO}"
+        "trainer.rollout_dataset.private=${ROLLOUT_DATASET_PRIVATE}"
+        "trainer.rollout_dataset.upload_num_workers=${ROLLOUT_DATASET_UPLOAD_WORKERS}"
+    )
+    echo "Rollout dataset: local=${ROLLOUT_DATASET_DIR}, hf=${ROLLOUT_DATASET_HF_REPO}, private=${ROLLOUT_DATASET_PRIVATE}"
+fi
+
 ALGORITHM_OVERRIDES=()
 if [[ "${ADVANTAGE_ESTIMATOR}" == "cost_aware_maxrl" ]]; then
     COST_REFERENCE_TOKENS=${MAXRL_COST_REFERENCE_TOKENS:-$((MAX_RESPONSE_LENGTH / 2))}
@@ -549,4 +593,5 @@ python -W ignore -m verl.trainer.main_ppo \
     trainer.test_freq=50 \
     trainer.total_epochs="${TOTAL_EPOCHS}" \
     ray_init.ray_dir="${MAXRL_RAY_DIR}" \
+    "${ROLLOUT_DATASET_OVERRIDES[@]}" \
     "$@"

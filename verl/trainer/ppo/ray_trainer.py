@@ -59,6 +59,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.rollout_dataset import dump_rollout_step, upload_rollout_dataset_to_hf
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -712,6 +713,30 @@ class RayPPOTrainer:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
 
+        rollout_dataset_config = config.trainer.get("rollout_dataset", {})
+        rollout_dataset_enabled = rollout_dataset_config.get("enabled", False)
+        if not isinstance(rollout_dataset_enabled, bool):
+            raise TypeError("trainer.rollout_dataset.enabled must be a boolean")
+        if rollout_dataset_enabled:
+            repo_id = rollout_dataset_config.get("hub_repo_id")
+            if not isinstance(repo_id, str) or repo_id.count("/") != 1:
+                raise ValueError(
+                    "trainer.rollout_dataset.hub_repo_id must have the form owner/name when enabled"
+                )
+            local_dir = rollout_dataset_config.get("local_dir")
+            if local_dir is not None and not isinstance(local_dir, str):
+                raise TypeError("trainer.rollout_dataset.local_dir must be null or a string")
+            private = rollout_dataset_config.get("private", False)
+            if not isinstance(private, bool):
+                raise TypeError("trainer.rollout_dataset.private must be a boolean")
+            upload_num_workers = rollout_dataset_config.get("upload_num_workers", 4)
+            if (
+                not isinstance(upload_num_workers, int)
+                or isinstance(upload_num_workers, bool)
+                or upload_num_workers < 1
+            ):
+                raise ValueError("trainer.rollout_dataset.upload_num_workers must be positive")
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
@@ -805,6 +830,87 @@ class RayPPOTrainer:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    def _rollout_dataset_config(self):
+        config = getattr(self, "config", None)
+        if config is None or not hasattr(config, "trainer"):
+            return {}
+        return config.trainer.get("rollout_dataset", {})
+
+    def _rollout_dataset_enabled(self) -> bool:
+        return bool(self._rollout_dataset_config().get("enabled", False))
+
+    def _rollout_dataset_local_dir(self) -> str:
+        rollout_dataset_config = self._rollout_dataset_config()
+        local_dir = rollout_dataset_config.get("local_dir")
+        if local_dir:
+            return os.path.abspath(os.path.expanduser(local_dir))
+        return os.path.join(
+            os.path.abspath(os.path.expanduser(self.config.trainer.default_local_dir)),
+            "rollout_dataset",
+        )
+
+    def _dump_training_rollout_dataset(self, batch, reward_extra_infos_dict) -> None:
+        inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        scores = batch.batch["token_level_scores"].sum(-1).detach().cpu().tolist()
+        response_mask = batch.batch["response_mask"].bool()
+        max_response_length = batch.batch["responses"].shape[-1]
+        prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
+
+        reserved_columns = {"input", "output", "rollout_index", "score", "step"}
+        extra_fields = {
+            key: values
+            for key, values in reward_extra_infos_dict.items()
+            if key not in reserved_columns
+        }
+        for key in ("uid", "data_source", "ability", "id", "reward_model", "extra_info"):
+            values = batch.non_tensor_batch.get(key)
+            if values is not None:
+                extra_fields.setdefault(key, values)
+
+        extra_fields["prompt_tokens"] = prompt_mask.sum(-1).detach().cpu().tolist()
+        extra_fields["response_tokens"] = response_mask.sum(-1).detach().cpu().tolist()
+        for field_name, tensor_name in (("advantage", "advantages"), ("return", "returns")):
+            values = batch.batch.get(tensor_name)
+            if values is None:
+                continue
+            sequence_values = (values.float() * response_mask).sum(-1) / response_mask.sum(-1).clamp_min(1)
+            extra_fields[field_name] = sequence_values.detach().cpu().tolist()
+
+        output_path = dump_rollout_step(
+            self._rollout_dataset_local_dir(),
+            step=self.global_steps,
+            inputs=inputs,
+            outputs=outputs,
+            scores=scores,
+            extra_fields=extra_fields,
+        )
+        print(f"Dumped training rollouts to {output_path}")
+
+    def _upload_rollout_dataset_if_enabled(self) -> Optional[str]:
+        if not self._rollout_dataset_enabled():
+            return None
+
+        rollout_dataset_config = self._rollout_dataset_config()
+        advantage_estimator = OmegaConf.select(self.config, "algorithm.adv_estimator")
+        metadata = {
+            "advantage_estimator": str(advantage_estimator),
+            "experiment_name": self.config.trainer.experiment_name,
+            "project_name": self.config.trainer.project_name,
+            "total_training_steps": int(self.total_training_steps),
+            "wandb_run_id": self.wandb_id,
+        }
+        dataset_url = upload_rollout_dataset_to_hf(
+            self._rollout_dataset_local_dir(),
+            repo_id=rollout_dataset_config.get("hub_repo_id"),
+            private=rollout_dataset_config.get("private", False),
+            num_workers=rollout_dataset_config.get("upload_num_workers", 4),
+            metadata=metadata,
+        )
+        self.rollout_dataset_url = dataset_url
+        print(f"Verified rollout dataset upload: {dataset_url}")
+        return dataset_url
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -1691,6 +1797,7 @@ class RayPPOTrainer:
         """Run training and deterministically finalize experiment tracking."""
         try:
             self._run_training_loop()
+            self._upload_rollout_dataset_if_enabled()
         except BaseException:
             try:
                 self._finish_tracking(exit_code=1)
@@ -1730,9 +1837,6 @@ class RayPPOTrainer:
 
         if isinstance(self.config.resume_training_parameters.wandb_id_to_resume, str):
             self.wandb_id = self.config.resume_training_parameters.wandb_id_to_resume
-
-        # NOTE: for now, we just force wandb logging in a new run
-        self.wandb_id = None
 
         # Setup logging
         logger = Tracking(
@@ -2044,20 +2148,27 @@ class RayPPOTrainer:
                                 )
 
                     # Log rollout generations if enabled
+                    rollout_dataset_enabled = self._rollout_dataset_enabled()
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
+                    if rollout_dataset_enabled or rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            print(batch.batch.keys())
-                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
+                            if rollout_dataset_enabled:
+                                self._dump_training_rollout_dataset(batch, reward_extra_infos_dict)
+                            else:
+                                inputs = self.tokenizer.batch_decode(
+                                    batch.batch["prompts"], skip_special_tokens=True
+                                )
+                                outputs = self.tokenizer.batch_decode(
+                                    batch.batch["responses"], skip_special_tokens=True
+                                )
+                                scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                                self._dump_generations(
+                                    inputs=inputs,
+                                    outputs=outputs,
+                                    scores=scores,
+                                    reward_extra_infos_dict=reward_extra_infos_dict,
+                                    dump_path=rollout_data_dir,
+                                )
 
                     # validate
                     validate_on_last_step = (

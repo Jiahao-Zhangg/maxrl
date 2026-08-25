@@ -3,6 +3,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.utils.tracking import Tracking
@@ -62,3 +63,77 @@ def test_ppo_trainer_finishes_tracking_after_failure():
 
     assert tracking.finish_calls == [1]
     assert trainer._tracking is None
+
+
+def test_ppo_trainer_uploads_rollout_dataset_after_training():
+    trainer = object.__new__(RayPPOTrainer)
+    tracking = _FakeTracking()
+    calls = []
+
+    trainer._tracking = tracking
+    trainer._run_training_loop = lambda: calls.append("train")
+    trainer._upload_rollout_dataset_if_enabled = lambda: calls.append("upload")
+    trainer.fit()
+
+    assert calls == ["train", "upload"]
+    assert tracking.finish_calls == [0]
+
+
+def test_ppo_trainer_marks_upload_failure_as_failed_run():
+    trainer = object.__new__(RayPPOTrainer)
+    tracking = _FakeTracking()
+
+    trainer._tracking = tracking
+    trainer._run_training_loop = lambda: None
+
+    def fail_upload():
+        raise RuntimeError("upload failed")
+
+    trainer._upload_rollout_dataset_if_enabled = fail_upload
+    with pytest.raises(RuntimeError, match="upload failed"):
+        trainer.fit()
+
+    assert tracking.finish_calls == [1]
+    assert trainer._tracking is None
+
+
+def test_ppo_trainer_resumes_previous_wandb_run(monkeypatch):
+    previous_run_ids = []
+
+    class _ResumeTracking:
+        def __init__(self, **kwargs):
+            previous_run_ids.append(kwargs["previous_run_id"])
+            self.wandb_id = kwargs["previous_run_id"]
+
+        def log(self, **kwargs):
+            pass
+
+    monkeypatch.setattr("verl.utils.tracking.Tracking", _ResumeTracking)
+
+    trainer = object.__new__(RayPPOTrainer)
+    trainer.config = OmegaConf.create(
+        {
+            "resume_training_parameters": {
+                "resume_global_steps": None,
+                "wandb_id_to_resume": None,
+            },
+            "trainer": {
+                "project_name": "project",
+                "experiment_name": "experiment",
+                "logger": ["wandb"],
+                "total_epochs": 0,
+            },
+        }
+    )
+    trainer.total_training_steps = 0
+    trainer.train_dataloader = []
+    trainer.val_reward_fn = None
+
+    def load_checkpoint():
+        trainer.wandb_id = "existing-run"
+
+    trainer._load_checkpoint = load_checkpoint
+    trainer._run_training_loop()
+
+    assert previous_run_ids == ["existing-run"]
+    assert trainer.wandb_id == "existing-run"

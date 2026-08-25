@@ -1001,6 +1001,17 @@ trainer:
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
 
+  # Save every completed training-step rollout and upload the complete run as
+  # a Hugging Face dataset. Disabled runs retain the legacy rollout_data_dir behavior.
+  rollout_dataset:
+    enabled: false
+    # Defaults to ${trainer.default_local_dir}/rollout_dataset when null.
+    local_dir: null
+    # Required when enabled, in owner/name form.
+    hub_repo_id: null
+    private: false
+    upload_num_workers: 4
+
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
