@@ -339,6 +339,38 @@ def test_efficient_reasoning_cost_normalizes_all_lengths_per_prompt_and_estimate
     torch.testing.assert_close(returns, advantages)
 
 
+def test_efficient_reasoning_cost_supports_fixed_q_hat_without_gating_failures():
+    response_mask = make_response_mask([2, 4, 6, 10], width=10)
+    advantages, returns, diagnostics = (
+        compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
+            token_level_rewards=make_token_rewards([1.0, 0.0, 0.0, 0.0], width=10),
+            response_mask=response_mask,
+            index=np.array(["prompt-a", "prompt-a", "prompt-b", "prompt-b"]),
+            expected_group_size=2,
+            config={"efficient_reasoning_fixed_q_hat": 0.8},
+            return_diagnostics=True,
+        )
+    )
+
+    expected_costs = torch.sigmoid(torch.tensor([-1.0, 1.0, -1.0, 1.0]))
+    expected_raw = torch.stack(
+        (
+            1.0 - 0.8 * expected_costs[0],
+            -0.8 * expected_costs[1] / 2.0,
+            -0.8 * expected_costs[2],
+            -0.8 * expected_costs[3],
+        )
+    )
+    torch.testing.assert_close(diagnostics["trajectory_costs"], expected_costs)
+    torch.testing.assert_close(diagnostics["group_q_hats"], torch.full((2,), 0.8))
+    torch.testing.assert_close(diagnostics["raw_trajectory_advantages"], expected_raw)
+    torch.testing.assert_close(
+        trajectory_advantages(advantages, response_mask),
+        2.0 * expected_raw,
+    )
+    torch.testing.assert_close(returns, advantages)
+
+
 def test_efficient_reasoning_cost_all_failure_group_has_zero_advantage():
     response_mask = make_response_mask([1, 4], width=4)
     advantages, returns, diagnostics = (

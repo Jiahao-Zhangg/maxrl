@@ -1083,6 +1083,7 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
     expected_group_size: Optional[int] = None,
     config=None,
     efficient_reasoning_epsilon: float = 1e-7,
+    efficient_reasoning_fixed_q_hat: Optional[float] = None,
     return_diagnostics: bool = False,
     **kwargs,
 ):
@@ -1090,19 +1091,24 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
 
     For each prompt group, normalize all N response lengths by their population
     mean and standard deviation, then set ``c_i = sigmoid(normalized_length_i)``.
-    With ``M`` successful trajectories, retain the same-group plug-in estimate
-    ``q_hat = M / sum_i c_i``. A success receives raw coefficient
-    ``(1 - q_hat * c_i) / M`` and a failure receives
-    ``-q_hat * c_i / (M + 1)``.
+    With ``M`` successful trajectories, use the same-group plug-in estimate
+    ``q_hat = M / sum_i c_i`` by default. Supplying
+    ``efficient_reasoning_fixed_q_hat`` replaces it with that detached
+    constant. A success receives raw coefficient ``(1 - q_hat * c_i) / M``
+    and a failure receives ``-q_hat * c_i / (M + 1)``.
 
     As in the other fixed-N estimators, the raw coefficients are multiplied by
     the fixed rollout count. The launchers default to ``token-mean`` to match
     original MaxRL, producing an additional inverse-mean-response-length scale
-    within each optimizer microbatch. All-failure groups have ``q_hat == 0``
-    and zero advantage.
+    within each optimizer microbatch. With the plug-in estimate, all-failure
+    groups have ``q_hat == 0`` and zero advantage; a fixed nonzero ``q_hat``
+    retains their negative cost update.
     """
     if config is not None:
         efficient_reasoning_epsilon = config.get("efficient_reasoning_epsilon", efficient_reasoning_epsilon)
+        efficient_reasoning_fixed_q_hat = config.get(
+            "efficient_reasoning_fixed_q_hat", efficient_reasoning_fixed_q_hat
+        )
 
     cost_mask = response_mask if trajectory_cost_mask is None else trajectory_cost_mask
     (
@@ -1126,6 +1132,7 @@ def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage(
         trajectory_lengths=trajectory_lengths,
         inverse_cost_cap_mask=torch.zeros_like(trajectory_costs, dtype=torch.bool),
         expected_group_size=expected_group_size,
+        fixed_q_hat=efficient_reasoning_fixed_q_hat,
         return_diagnostics=True,
         **kwargs,
     )

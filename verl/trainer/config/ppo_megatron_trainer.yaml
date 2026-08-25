@@ -351,6 +351,8 @@ algorithm:
   fixed_q_hat: 2.0
   # Numerical stabilizer added to each prompt group's response-length standard deviation
   efficient_reasoning_epsilon: 1.0e-7
+  # Optional detached constant q-hat for Efficient-Reasoning cost; null uses M / sum(cost)
+  efficient_reasoning_fixed_q_hat: null
   # Maximum trajectory cost used to map RB cost-aware MaxRL lengths into [0, 1]
   rb_cost_max_tokens: null
   use_kl_in_reward: False

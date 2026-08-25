@@ -452,10 +452,19 @@ elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_efficient_reasoning_cost_marginr
         exit 1
     fi
     EFFICIENT_REASONING_EPSILON=${MAXRL_EFFICIENT_REASONING_EPSILON:-1e-7}
+    EFFICIENT_REASONING_FIXED_Q_HAT=${MAXRL_EFFICIENT_REASONING_FIXED_Q_HAT:-}
     ALGORITHM_OVERRIDES+=(
         "algorithm.efficient_reasoning_epsilon=${EFFICIENT_REASONING_EPSILON}"
     )
-    echo "Efficient-Reasoning sigmoid-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, normalization=all responses per prompt, q_hat=M/sum(cost), failure advantage=-q_hat*cost/(M+1)"
+    if [[ -n "${EFFICIENT_REASONING_FIXED_Q_HAT}" ]]; then
+        ALGORITHM_OVERRIDES+=(
+            "algorithm.efficient_reasoning_fixed_q_hat=${EFFICIENT_REASONING_FIXED_Q_HAT}"
+        )
+        Q_HAT_DESCRIPTION="fixed ${EFFICIENT_REASONING_FIXED_Q_HAT}"
+    else
+        Q_HAT_DESCRIPTION="M/sum(cost)"
+    fi
+    echo "Efficient-Reasoning sigmoid-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, normalization=all responses per prompt, q_hat=${Q_HAT_DESCRIPTION}, failure advantage=-q_hat*cost/(M+1)"
 elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_cost_aware_marginrl_success_gated"
