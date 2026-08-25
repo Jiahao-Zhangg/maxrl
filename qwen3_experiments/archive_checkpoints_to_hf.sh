@@ -60,10 +60,14 @@ if [[ ! "${HF_REPO_PREFIX}" =~ ^[^/]+/[^/]+$ ]]; then
     exit 2
 fi
 
-command -v hf >/dev/null 2>&1 || {
-    echo "error: the Hugging Face 'hf' CLI is required" >&2
+if command -v hf >/dev/null 2>&1; then
+    HF_CLI=hf
+elif command -v huggingface-cli >/dev/null 2>&1; then
+    HF_CLI=huggingface-cli
+else
+    echo "error: the Hugging Face 'hf' or 'huggingface-cli' CLI is required" >&2
     exit 1
-}
+fi
 command -v flock >/dev/null 2>&1 || {
     echo "error: flock is required" >&2
     exit 1
@@ -253,7 +257,7 @@ archive_checkpoint() {
     # while this server's authenticated `hf` launcher is installed in the
     # user site. Unset only for the CLI subprocess so the trainer remains
     # isolated from user packages.
-    if ! env -u PYTHONNOUSERSITE HF_XET_HIGH_PERFORMANCE=1 hf upload-large-folder \
+    if ! env -u PYTHONNOUSERSITE HF_XET_HIGH_PERFORMANCE=1 "${HF_CLI}" upload-large-folder \
         "${repo_id}" "${EXPERIMENT_DIR}" \
         --repo-type model \
         --include "${checkpoint_name}/**" \
