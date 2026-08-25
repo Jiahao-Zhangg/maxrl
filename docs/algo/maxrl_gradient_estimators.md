@@ -327,14 +327,15 @@ length and EOS metrics still reveal whether failed generations are collapsing.
 
 ### Shortest-rollout trace
 
-Both Efficient-Reasoning launchers also append the globally shortest response
-from every training round to
+Shortest-rollout logging is disabled by default because the rollout-dataset
+export already preserves every generated response. Set
+`MAXRL_SAVE_SHORTEST_ROLLOUT=true` to additionally append the globally shortest
+response from every training round to
 `<checkpoint_dir>/debug/shortest_rollouts.jsonl`. Each JSON object contains the
 training step, batch position, prompt UID and decoded prompt, decoded response,
 response-token count, scalar grader reward, and binary correctness. Selection
 is over the complete driver batch; equal-length responses are resolved by the
-first batch position. Set `MAXRL_SAVE_SHORTEST_ROLLOUT=false` to disable this
-trace for an ER launch.
+first batch position.
 
 ## Implementation map
 
