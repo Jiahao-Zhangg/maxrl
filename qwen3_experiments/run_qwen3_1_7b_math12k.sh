@@ -325,9 +325,23 @@ PY
 prepare_dataset() {
     local converter=$1
     local destination=$2
+    shift 2
+
+    local required_file
+    local should_prepare=${MAXRL_REFRESH_DATA}
+    if (( $# == 0 )); then
+        set -- train.parquet test.parquet
+    fi
+
+    [[ -f "${converter}" ]] || die "dataset converter not found: ${converter}"
+    for required_file in "$@"; do
+        if [[ ! -s "${destination}/${required_file}" ]]; then
+            should_prepare=1
+        fi
+    done
 
     mkdir -p "${destination}"
-    if [[ "${MAXRL_REFRESH_DATA}" == "1" || ! -s "${destination}/train.parquet" || ! -s "${destination}/test.parquet" ]]; then
+    if [[ "${should_prepare}" == "1" ]]; then
         python "${converter}" --local_dir "${destination}"
     else
         echo "Reusing prepared dataset in ${destination}"
@@ -349,19 +363,25 @@ fi
 
 cd "${REPO_ROOT}"
 
-MATH12K_DIR=${MAXRL_DATA_DIR}/math12k
+TRAIN_DATASET_NAME=${MAXRL_TRAIN_DATASET_NAME:-hiyouga/math12k}
+TRAIN_DATASET_DIR=${MAXRL_TRAIN_DATASET_DIR:-${MAXRL_DATA_DIR}/math12k}
+TRAIN_DATASET_CONVERTER=${MAXRL_TRAIN_DATASET_CONVERTER:-${REPO_ROOT}/examples/maxrl_data_preprocess/math12k.py}
+TRAIN_DATASET_PATH=${MAXRL_TRAIN_DATASET_PATH:-${TRAIN_DATASET_DIR}/train.parquet}
 AIME25_DIR=${MAXRL_DATA_DIR}/aime25
 MATH500_DIR=${MAXRL_DATA_DIR}/math500
 
 prepare_dataset \
-    "${REPO_ROOT}/examples/maxrl_data_preprocess/math12k.py" \
-    "${MATH12K_DIR}"
+    "${TRAIN_DATASET_CONVERTER}" \
+    "${TRAIN_DATASET_DIR}" \
+    train.parquet
 prepare_dataset \
     "${REPO_ROOT}/examples/maxrl_data_preprocess/aime25.py" \
-    "${AIME25_DIR}"
+    "${AIME25_DIR}" \
+    test.parquet
 prepare_dataset \
     "${REPO_ROOT}/examples/maxrl_data_preprocess/math_500.py" \
-    "${MATH500_DIR}"
+    "${MATH500_DIR}" \
+    test.parquet
 
 python - <<'PY'
 import torch
@@ -548,9 +568,9 @@ elif [[
 fi
 
 if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
-    echo "Training ${MODEL_NAME} with hiyouga/math12k for exactly ${TOTAL_TRAINING_STEPS} steps (epoch ceiling: ${TOTAL_EPOCHS})"
+    echo "Training ${MODEL_NAME} with ${TRAIN_DATASET_NAME} for exactly ${TOTAL_TRAINING_STEPS} steps (epoch ceiling: ${TOTAL_EPOCHS})"
 else
-    echo "Training ${MODEL_NAME} with hiyouga/math12k for ${TOTAL_EPOCHS} epochs"
+    echo "Training ${MODEL_NAME} with ${TRAIN_DATASET_NAME} for ${TOTAL_EPOCHS} epochs"
 fi
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "Advantage estimator: ${ADVANTAGE_ESTIMATOR}; loss aggregation: ${LOSS_AGG_MODE}"
@@ -561,7 +581,7 @@ fi
 
 python -W ignore -m verl.trainer.main_ppo \
     algorithm.adv_estimator="${ADVANTAGE_ESTIMATOR}" \
-    data.train_files="${MATH12K_DIR}/train.parquet" \
+    data.train_files="${TRAIN_DATASET_PATH}" \
     data.val_files="${TEST_DATASET_PATH}" \
     data.train_batch_size="${FULL_BATCH_SIZE}" \
     data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
