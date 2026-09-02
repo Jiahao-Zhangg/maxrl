@@ -180,6 +180,337 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
     return metrics
 
 
+def compute_cost_aware_maxrl_metrics(
+    trajectory_lengths: torch.Tensor,
+    trajectory_costs: torch.Tensor,
+    inverse_cost_cap_mask: torch.Tensor,
+) -> Dict[str, float]:
+    """Summarize cost-aware MaxRL trajectory statistics for one training step."""
+    if trajectory_lengths.numel() == 0:
+        raise ValueError("cost-aware MaxRL metrics require at least one trajectory")
+    if (
+        trajectory_lengths.shape != trajectory_costs.shape
+        or trajectory_lengths.shape != inverse_cost_cap_mask.shape
+    ):
+        raise ValueError("trajectory lengths, costs, and cap mask must have matching shapes")
+
+    lengths = trajectory_lengths.detach().float()
+    costs = trajectory_costs.detach().float()
+    cap_mask = inverse_cost_cap_mask.detach().float()
+    return {
+        "cost_aware_maxrl/trajectory_tokens_mean": lengths.mean().item(),
+        "cost_aware_maxrl/trajectory_tokens_max": lengths.max().item(),
+        "cost_aware_maxrl/trajectory_tokens_min": lengths.min().item(),
+        "cost_aware_maxrl/cost_mean": costs.mean().item(),
+        "cost_aware_maxrl/cost_max": costs.max().item(),
+        "cost_aware_maxrl/cost_min": costs.min().item(),
+        "cost_aware_maxrl/cap_ratio": cap_mask.mean().item(),
+    }
+
+
+def compute_rb_cost_aware_maxrl_metrics(
+    trajectory_lengths: torch.Tensor,
+    cost_probabilities: torch.Tensor,
+    betas: torch.Tensor,
+    zero_success_groups: torch.Tensor,
+) -> Dict[str, float]:
+    """Summarize success-gated Rao-Blackwellized MaxRL statistics."""
+    if trajectory_lengths.numel() == 0 or zero_success_groups.numel() == 0:
+        raise ValueError("RB cost-aware MaxRL metrics require trajectories and prompt groups")
+    if trajectory_lengths.shape != cost_probabilities.shape or trajectory_lengths.shape != betas.shape:
+        raise ValueError("trajectory lengths, cost probabilities, and betas must have matching shapes")
+
+    lengths = trajectory_lengths.detach().float()
+    kappas = cost_probabilities.detach().float()
+    beta_values = betas.detach().float()
+    zero_success = zero_success_groups.detach().float()
+    return {
+        "rb_cost_aware_maxrl/trajectory_tokens_mean": lengths.mean().item(),
+        "rb_cost_aware_maxrl/trajectory_tokens_max": lengths.max().item(),
+        "rb_cost_aware_maxrl/trajectory_tokens_min": lengths.min().item(),
+        "rb_cost_aware_maxrl/kappa_mean": kappas.mean().item(),
+        "rb_cost_aware_maxrl/kappa_max": kappas.max().item(),
+        "rb_cost_aware_maxrl/kappa_min": kappas.min().item(),
+        "rb_cost_aware_maxrl/beta_mean": beta_values.mean().item(),
+        "rb_cost_aware_maxrl/beta_max": beta_values.max().item(),
+        "rb_cost_aware_maxrl/beta_min": beta_values.min().item(),
+        "rb_cost_aware_maxrl/zero_success_group_ratio": zero_success.mean().item(),
+    }
+
+
+def compute_fixed_n_rb_cost_aware_marginrl_metrics(
+    trajectory_lengths: torch.Tensor,
+    trajectory_costs: torch.Tensor,
+    inverse_cost_cap_mask: torch.Tensor,
+    trajectory_rewards: torch.Tensor,
+    raw_trajectory_advantages: torch.Tensor,
+    optimizer_trajectory_advantages: torch.Tensor,
+    group_q_hats: torch.Tensor,
+    group_success_counts: torch.Tensor,
+    group_total_costs: torch.Tensor,
+    group_cost_means: torch.Tensor,
+    group_cost_stds: torch.Tensor,
+    group_accuracies: torch.Tensor,
+    metric_prefix: str = "fixed_n_rb_marginrl",
+) -> Dict[str, float]:
+    """Summarize fixed-N RB cost-aware MarginRL statistics for W&B."""
+    if not metric_prefix:
+        raise ValueError("fixed-N RB MarginRL metric prefix must be nonempty")
+    trajectory_tensors = (
+        trajectory_lengths,
+        trajectory_costs,
+        inverse_cost_cap_mask,
+        trajectory_rewards,
+        raw_trajectory_advantages,
+        optimizer_trajectory_advantages,
+    )
+    group_tensors = (
+        group_q_hats,
+        group_success_counts,
+        group_total_costs,
+        group_cost_means,
+        group_cost_stds,
+        group_accuracies,
+    )
+    if any(tensor.numel() == 0 for tensor in (*trajectory_tensors, *group_tensors)):
+        raise ValueError("fixed-N RB MarginRL metrics require trajectories and prompt groups")
+    if any(tensor.shape != trajectory_costs.shape for tensor in trajectory_tensors):
+        raise ValueError("fixed-N RB MarginRL trajectory diagnostics must have matching shapes")
+    if any(tensor.shape != group_q_hats.shape for tensor in group_tensors[1:]):
+        raise ValueError("fixed-N RB MarginRL group diagnostics must have matching shapes")
+
+    lengths = trajectory_lengths.detach().float()
+    costs = trajectory_costs.detach().float()
+    cap_mask = inverse_cost_cap_mask.detach().float()
+    rewards = trajectory_rewards.detach().float()
+    raw_advantages = raw_trajectory_advantages.detach().float()
+    optimizer_advantages = optimizer_trajectory_advantages.detach().float()
+    q_hats = group_q_hats.detach().float()
+    success_counts = group_success_counts.detach().float()
+    total_costs = group_total_costs.detach().float()
+    cost_means = group_cost_means.detach().float()
+    cost_stds = group_cost_stds.detach().float()
+    accuracies = group_accuracies.detach().float()
+
+    def population_std(values: torch.Tensor) -> float:
+        return values.std(unbiased=False).item()
+
+    failure_mask = rewards == 0
+    failure_advantage_abs_max = (
+        raw_advantages[failure_mask].abs().max().item()
+        if failure_mask.any().item()
+        else 0.0
+    )
+
+    return {
+        # Applicable trajectory-length metrics retained from prior variants.
+        f"{metric_prefix}/trajectory_tokens_mean": lengths.mean().item(),
+        f"{metric_prefix}/trajectory_tokens_max": lengths.max().item(),
+        f"{metric_prefix}/trajectory_tokens_min": lengths.min().item(),
+        # Requested detached rate and sufficient statistics, summarized over prompts.
+        f"{metric_prefix}/q_hat_mean": q_hats.mean().item(),
+        f"{metric_prefix}/q_hat_std": population_std(q_hats),
+        f"{metric_prefix}/q_hat_max": q_hats.max().item(),
+        f"{metric_prefix}/q_hat_min": q_hats.min().item(),
+        f"{metric_prefix}/M_t_mean": success_counts.mean().item(),
+        f"{metric_prefix}/M_t_std": population_std(success_counts),
+        f"{metric_prefix}/M_t_max": success_counts.max().item(),
+        f"{metric_prefix}/M_t_min": success_counts.min().item(),
+        f"{metric_prefix}/total_cost_mean": total_costs.mean().item(),
+        f"{metric_prefix}/total_cost_std": population_std(total_costs),
+        f"{metric_prefix}/total_cost_max": total_costs.max().item(),
+        f"{metric_prefix}/total_cost_min": total_costs.min().item(),
+        f"{metric_prefix}/cost_mean": costs.mean().item(),
+        f"{metric_prefix}/cost_std": population_std(costs),
+        f"{metric_prefix}/cost_max": costs.max().item(),
+        f"{metric_prefix}/cost_min": costs.min().item(),
+        f"{metric_prefix}/cap_ratio": cap_mask.mean().item(),
+        f"{metric_prefix}/group_cost_mean_std": population_std(cost_means),
+        f"{metric_prefix}/group_cost_std_mean": cost_stds.mean().item(),
+        f"{metric_prefix}/group_cost_std_std": population_std(cost_stds),
+        f"{metric_prefix}/accuracy_mean": accuracies.mean().item(),
+        f"{metric_prefix}/accuracy_std": population_std(accuracies),
+        f"{metric_prefix}/accuracy_max": accuracies.max().item(),
+        f"{metric_prefix}/accuracy_min": accuracies.min().item(),
+        f"{metric_prefix}/zero_success_group_ratio": (success_counts == 0).float().mean().item(),
+        f"{metric_prefix}/failure_advantage_abs_max": failure_advantage_abs_max,
+        f"{metric_prefix}/raw_advantage_mean": raw_advantages.mean().item(),
+        f"{metric_prefix}/raw_advantage_std": population_std(raw_advantages),
+        f"{metric_prefix}/raw_advantage_max": raw_advantages.max().item(),
+        f"{metric_prefix}/raw_advantage_min": raw_advantages.min().item(),
+        f"{metric_prefix}/optimizer_advantage_mean": optimizer_advantages.mean().item(),
+        f"{metric_prefix}/optimizer_advantage_std": population_std(optimizer_advantages),
+        f"{metric_prefix}/optimizer_advantage_max": optimizer_advantages.max().item(),
+        f"{metric_prefix}/optimizer_advantage_min": optimizer_advantages.min().item(),
+    }
+
+
+def compute_thinking_efficiency_reward_metrics(
+    raw_math_accuracy,
+    post_think_pre_box_tokens,
+    has_think_open,
+    has_think_close,
+    has_box_after_think,
+    thinking_span_censored,
+    post_think_length_pass,
+    gated_reward,
+    metric_prefix: str = "fixed_n_rb_capped_thinking_marginrl",
+) -> Dict[str, float]:
+    """Summarize marker coverage and the concise-answer reward gate."""
+    if not metric_prefix:
+        raise ValueError("thinking-efficiency metric prefix must be nonempty")
+
+    def as_vector(name: str, values) -> torch.Tensor:
+        tensor = torch.as_tensor(values, dtype=torch.float32)
+        if tensor.ndim != 1 or tensor.numel() == 0:
+            raise ValueError(
+                f"{name} must be a nonempty rank-1 vector, got {tuple(tensor.shape)}"
+            )
+        if not torch.isfinite(tensor).all().item():
+            raise ValueError(f"{name} must contain only finite values")
+        return tensor
+
+    raw_accuracy = as_vector("raw_math_accuracy", raw_math_accuracy)
+    post_tokens = as_vector(
+        "post_think_pre_box_tokens", post_think_pre_box_tokens
+    )
+    open_mask = as_vector("has_think_open", has_think_open)
+    close_mask = as_vector("has_think_close", has_think_close)
+    box_mask = as_vector("has_box_after_think", has_box_after_think)
+    censored_mask = as_vector("thinking_span_censored", thinking_span_censored)
+    length_pass = as_vector("post_think_length_pass", post_think_length_pass)
+    rewards = as_vector("gated_reward", gated_reward)
+
+    vectors = (
+        post_tokens,
+        open_mask,
+        close_mask,
+        box_mask,
+        censored_mask,
+        length_pass,
+        rewards,
+    )
+    if any(vector.shape != raw_accuracy.shape for vector in vectors):
+        raise ValueError("thinking-efficiency diagnostics must have matching shapes")
+
+    valid_post_tokens = post_tokens[post_tokens >= 0]
+    raw_successes = raw_accuracy.sum().item()
+    reward_retention = rewards.sum().item() / raw_successes if raw_successes > 0 else 0.0
+
+    metrics = {
+        f"{metric_prefix}/raw_math_accuracy_mean": raw_accuracy.mean().item(),
+        f"{metric_prefix}/raw_math_accuracy_std": raw_accuracy.std(unbiased=False).item(),
+        f"{metric_prefix}/gated_reward_mean": rewards.mean().item(),
+        f"{metric_prefix}/gated_reward_std": rewards.std(unbiased=False).item(),
+        f"{metric_prefix}/correct_reward_retention": reward_retention,
+        f"{metric_prefix}/think_open_rate": open_mask.mean().item(),
+        f"{metric_prefix}/think_close_rate": close_mask.mean().item(),
+        f"{metric_prefix}/box_after_think_rate": box_mask.mean().item(),
+        f"{metric_prefix}/thinking_span_censored_rate": censored_mask.mean().item(),
+        f"{metric_prefix}/post_think_length_pass_rate": length_pass.mean().item(),
+    }
+    if valid_post_tokens.numel() == 0:
+        metrics.update(
+            {
+                f"{metric_prefix}/post_think_pre_box_tokens_mean": 0.0,
+                f"{metric_prefix}/post_think_pre_box_tokens_std": 0.0,
+                f"{metric_prefix}/post_think_pre_box_tokens_max": 0.0,
+                f"{metric_prefix}/post_think_pre_box_tokens_min": 0.0,
+            }
+        )
+    else:
+        metrics.update(
+            {
+                f"{metric_prefix}/post_think_pre_box_tokens_mean": valid_post_tokens.mean().item(),
+                f"{metric_prefix}/post_think_pre_box_tokens_std": valid_post_tokens.std(
+                    unbiased=False
+                ).item(),
+                f"{metric_prefix}/post_think_pre_box_tokens_max": valid_post_tokens.max().item(),
+                f"{metric_prefix}/post_think_pre_box_tokens_min": valid_post_tokens.min().item(),
+            }
+        )
+    return metrics
+
+
+def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
+    trajectory_relative_lengths: torch.Tensor,
+    group_length_means: torch.Tensor,
+    group_length_stds: torch.Tensor,
+    metric_prefix: str = "fixed_n_rb_er_cost_marginrl",
+    **base_diagnostics,
+) -> Dict[str, float]:
+    """Add per-prompt normalized-length statistics to fixed-N metrics."""
+    metrics = compute_fixed_n_rb_cost_aware_marginrl_metrics(
+        metric_prefix=metric_prefix,
+        **base_diagnostics,
+    )
+    trajectory_costs = base_diagnostics["trajectory_costs"]
+    trajectory_lengths = base_diagnostics["trajectory_lengths"]
+    trajectory_rewards = base_diagnostics["trajectory_rewards"]
+    optimizer_trajectory_advantages = base_diagnostics["optimizer_trajectory_advantages"]
+    group_success_counts = base_diagnostics["group_success_counts"]
+    if trajectory_relative_lengths.shape != trajectory_costs.shape:
+        raise ValueError("Efficient-Reasoning relative lengths must match trajectory costs")
+    group_tensors = (group_length_means, group_length_stds, group_success_counts)
+    if any(tensor.shape != group_success_counts.shape for tensor in group_tensors):
+        raise ValueError("Efficient-Reasoning group diagnostics must have matching shapes")
+
+    relative_lengths = trajectory_relative_lengths.detach().float()
+    length_means = group_length_means.detach().float()
+    length_stds = group_length_stds.detach().float()
+    lengths = trajectory_lengths.detach().float()
+    rewards = trajectory_rewards.detach().float()
+    optimizer_advantages = optimizer_trajectory_advantages.detach().float()
+
+    binary_reward_mask = (rewards == 0) | (rewards == 1)
+    if not binary_reward_mask.all().item():
+        raise ValueError("Efficient-Reasoning early-EOS metrics require binary trajectory rewards")
+
+    def masked_mean_or_zero(values: torch.Tensor, mask: torch.Tensor) -> float:
+        selected = values[mask]
+        return selected.mean().item() if selected.numel() > 0 else 0.0
+
+    early_eos_mask = lengths <= 2
+    failure_mask = rewards == 0
+    success_mask = rewards == 1
+    short_failure_mask = failure_mask & early_eos_mask
+    normal_failure_mask = failure_mask & ~early_eos_mask
+
+    metrics.update(
+        {
+            f"{metric_prefix}/relative_length_mean": relative_lengths.mean().item(),
+            f"{metric_prefix}/relative_length_std": relative_lengths.std(unbiased=False).item(),
+            f"{metric_prefix}/relative_length_max": relative_lengths.max().item(),
+            f"{metric_prefix}/relative_length_min": relative_lengths.min().item(),
+            f"{metric_prefix}/group_length_mean_mean": length_means.mean().item(),
+            f"{metric_prefix}/group_length_mean_std": length_means.std(unbiased=False).item(),
+            f"{metric_prefix}/group_length_std_mean": length_stds.mean().item(),
+            f"{metric_prefix}/group_length_std_std": length_stds.std(unbiased=False).item(),
+            # Advantage diagnostics use the fixed-N-scaled trajectory values
+            # supplied to PPO, not the raw estimator coefficients.
+            f"{metric_prefix}/early_eos_rate": early_eos_mask.float().mean().item(),
+            f"{metric_prefix}/early_eos_fail_rate": masked_mean_or_zero(
+                early_eos_mask.float(), failure_mask
+            ),
+            f"{metric_prefix}/mean_len_fail": masked_mean_or_zero(lengths, failure_mask),
+            f"{metric_prefix}/mean_len_success": masked_mean_or_zero(lengths, success_mask),
+            f"{metric_prefix}/adv_short_fail": masked_mean_or_zero(
+                optimizer_advantages, short_failure_mask
+            ),
+            f"{metric_prefix}/adv_normal_fail": masked_mean_or_zero(
+                optimizer_advantages, normal_failure_mask
+            ),
+            f"{metric_prefix}/adv_success": masked_mean_or_zero(
+                optimizer_advantages, success_mask
+            ),
+            f"{metric_prefix}/frac_negative_adv_success": masked_mean_or_zero(
+                (optimizer_advantages < 0).float(), success_mask
+            ),
+        }
+    )
+    return metrics
+
+
 def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.

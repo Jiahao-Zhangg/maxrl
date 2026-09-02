@@ -44,7 +44,12 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
+    compute_cost_aware_maxrl_metrics,
     compute_data_metrics,
+    compute_fixed_n_rb_cost_aware_marginrl_metrics,
+    compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics,
+    compute_rb_cost_aware_maxrl_metrics,
+    compute_thinking_efficiency_reward_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -55,6 +60,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.rollout_dataset import dump_rollout_step, upload_rollout_dataset_to_hf
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -286,6 +292,195 @@ def compute_advantage(
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
+    elif adv_estimator == AdvantageEstimator.COST_AWARE_MAXRL:
+        calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = calculation_mask.size(1)
+            calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        cost_reference_tokens = config.get("cost_reference_tokens", None) if config is not None else None
+        max_inverse_cost = config.get("max_inverse_cost", 4.0) if config is not None else 4.0
+        advantages, returns = core_algos.compute_cost_aware_maxrl_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            config=config,
+        )
+        trajectory_lengths, trajectory_costs, _, inverse_cost_cap_mask = core_algos.compute_cost_aware_maxrl_costs(
+            response_mask=calculation_mask,
+            cost_reference_tokens=cost_reference_tokens,
+            max_inverse_cost=max_inverse_cost,
+        )
+        data.meta_info["cost_aware_maxrl_metrics"] = compute_cost_aware_maxrl_metrics(
+            trajectory_lengths=trajectory_lengths,
+            trajectory_costs=trajectory_costs,
+            inverse_cost_cap_mask=inverse_cost_cap_mask,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
+    elif adv_estimator == AdvantageEstimator.RB_COST_AWARE_MAXRL:
+        calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = calculation_mask.size(1)
+            calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        advantages, returns, diagnostics = core_algos.compute_rb_cost_aware_maxrl_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            config=config,
+            return_diagnostics=True,
+        )
+        data.meta_info["rb_cost_aware_maxrl_metrics"] = compute_rb_cost_aware_maxrl_metrics(**diagnostics)
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
+    elif adv_estimator in (
+        AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+        AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+    ):
+        calculation_mask = data.batch["response_mask"]
+        trajectory_cost_mask = data.batch["response_mask"]
+        if multi_turn:
+            response_length = calculation_mask.size(1)
+            calculation_mask = data.batch["loss_mask"][:, -response_length:]
+
+        success_gated = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED
+        )
+        capped_cost = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL
+        )
+        thinking_cost = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL
+        )
+        capped_fixed_q = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL
+        )
+        efficient_reasoning_success_gated = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED
+        )
+        efficient_reasoning_cost = adv_estimator in (
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
+        )
+        if efficient_reasoning_success_gated:
+            advantage_fn = (
+                core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated_outcome_advantage
+            )
+        elif efficient_reasoning_cost:
+            advantage_fn = (
+                core_algos.compute_fixed_n_rb_efficient_reasoning_cost_marginrl_outcome_advantage
+            )
+        elif success_gated:
+            advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage
+        elif capped_fixed_q:
+            advantage_fn = core_algos.compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage
+        elif thinking_cost:
+            advantage_fn = (
+                core_algos.compute_fixed_n_rb_capped_thinking_cost_aware_marginrl_outcome_advantage
+            )
+        elif capped_cost:
+            advantage_fn = core_algos.compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage
+        else:
+            advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage
+
+        advantage_kwargs = {}
+        if thinking_cost:
+            if "thinking_tokens" not in data.non_tensor_batch:
+                raise ValueError(
+                    "fixed_n_rb_capped_thinking_cost_aware_marginrl requires "
+                    "thinking_tokens from the reward manager"
+                )
+            thinking_lengths = torch.as_tensor(
+                data.non_tensor_batch["thinking_tokens"],
+                dtype=torch.float32,
+                device=calculation_mask.device,
+            )
+            if thinking_lengths.ndim != 1 or thinking_lengths.shape[0] != calculation_mask.shape[0]:
+                raise ValueError(
+                    "thinking_tokens must contain one value per trajectory; "
+                    f"got {tuple(thinking_lengths.shape)} for batch size "
+                    f"{calculation_mask.shape[0]}"
+                )
+            advantage_kwargs["trajectory_lengths"] = thinking_lengths
+        advantages, returns, diagnostics = advantage_fn(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            trajectory_cost_mask=trajectory_cost_mask,
+            index=data.non_tensor_batch["uid"],
+            expected_group_size=num_repeat,
+            config=config,
+            return_diagnostics=True,
+            **advantage_kwargs,
+        )
+        if efficient_reasoning_success_gated:
+            metric_prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
+        elif efficient_reasoning_cost:
+            metric_prefix = "fixed_n_rb_er_cost_marginrl"
+        elif success_gated:
+            metric_prefix = "fixed_n_rb_marginrl_success_gated"
+        elif capped_fixed_q:
+            metric_prefix = "fixed_n_rb_capped_fixed_q_marginrl"
+        elif thinking_cost:
+            metric_prefix = "fixed_n_rb_capped_thinking_marginrl"
+        elif capped_cost:
+            metric_prefix = "fixed_n_rb_capped_marginrl"
+        else:
+            metric_prefix = "fixed_n_rb_marginrl"
+        if efficient_reasoning_cost:
+            marginrl_metrics = compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
+                **diagnostics,
+                metric_prefix=metric_prefix,
+            )
+        else:
+            marginrl_metrics = compute_fixed_n_rb_cost_aware_marginrl_metrics(
+                **diagnostics,
+                metric_prefix=metric_prefix,
+            )
+        if thinking_cost:
+            required_reward_metrics = (
+                "raw_math_accuracy",
+                "post_think_pre_box_tokens",
+                "has_think_open",
+                "has_think_close",
+                "has_box_after_think",
+                "thinking_span_censored",
+                "post_think_length_pass",
+                "gated_reward",
+            )
+            missing_metrics = [
+                key for key in required_reward_metrics if key not in data.non_tensor_batch
+            ]
+            if missing_metrics:
+                raise ValueError(
+                    "thinking-cost reward diagnostics are missing: "
+                    f"{missing_metrics}"
+                )
+            marginrl_metrics.update(
+                compute_thinking_efficiency_reward_metrics(
+                    **{
+                        key: data.non_tensor_batch[key]
+                        for key in required_reward_metrics
+                    },
+                    metric_prefix=metric_prefix,
+                )
+            )
+        data.meta_info["fixed_n_rb_marginrl_metrics"] = marginrl_metrics
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
     elif adv_estimator == AdvantageEstimator.GRPO_WITH_FILTERED_SFT:
         # Initialize the mask for SFT calculation
         sft_calculation_mask = data.batch["response_mask"]
@@ -377,6 +572,83 @@ def compute_advantage(
     return data
 
 
+def build_shortest_rollout_record(
+    data: DataProto,
+    tokenizer,
+    global_step: int,
+) -> dict[str, object]:
+    """Build a deterministic record for the globally shortest rollout."""
+    required_batch_keys = {
+        "prompts",
+        "responses",
+        "attention_mask",
+        "response_mask",
+        "token_level_scores",
+    }
+    missing_keys = required_batch_keys.difference(data.batch.keys())
+    if missing_keys:
+        raise ValueError(
+            "shortest-rollout logging requires batch keys "
+            f"{sorted(missing_keys)}"
+        )
+
+    prompts = data.batch["prompts"]
+    responses = data.batch["responses"]
+    attention_mask = data.batch["attention_mask"].bool()
+    response_mask = data.batch["response_mask"].bool()
+    token_level_scores = data.batch["token_level_scores"]
+    batch_size = responses.shape[0]
+    if batch_size == 0:
+        raise ValueError("shortest-rollout logging requires at least one rollout")
+    if any(tensor.shape[0] != batch_size for tensor in (prompts, attention_mask, response_mask, token_level_scores)):
+        raise ValueError("shortest-rollout batch tensors must have matching batch dimensions")
+    if response_mask.shape != responses.shape:
+        raise ValueError("shortest-rollout responses and response mask must have matching shapes")
+    if attention_mask.shape[1] < prompts.shape[1]:
+        raise ValueError("shortest-rollout attention mask is shorter than the prompt tensor")
+
+    response_lengths = response_mask.sum(dim=-1)
+    shortest_position = int(torch.argmin(response_lengths).item())
+    prompt_mask = attention_mask[:, : prompts.shape[1]]
+    prompt_token_ids = prompts[shortest_position][prompt_mask[shortest_position]]
+    response_token_ids = responses[shortest_position][response_mask[shortest_position]]
+    score = token_level_scores[shortest_position].detach().float().sum()
+    correct = torch.isclose(
+        score,
+        score.new_tensor(1.0),
+        rtol=0.0,
+        atol=1e-6,
+    ).item()
+
+    prompt_uids = data.non_tensor_batch.get("uid")
+    prompt_uid = None if prompt_uids is None else str(prompt_uids[shortest_position])
+    return {
+        "global_step": int(global_step),
+        "batch_position": shortest_position,
+        "prompt_uid": prompt_uid,
+        "prompt": tokenizer.decode(
+            prompt_token_ids.detach().cpu().tolist(), skip_special_tokens=True
+        ),
+        "response": tokenizer.decode(
+            response_token_ids.detach().cpu().tolist(), skip_special_tokens=True
+        ),
+        "response_tokens": int(response_lengths[shortest_position].item()),
+        "reward": float(score.item()),
+        "correct": bool(correct),
+    }
+
+
+def append_shortest_rollout_record(filename: str, record: dict[str, object]) -> None:
+    """Append one shortest-rollout record to a driver-owned JSONL file."""
+    parent_dir = os.path.dirname(filename)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    with open(filename, "a", encoding="utf-8") as output_file:
+        output_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        output_file.flush()
+        os.fsync(output_file.fileno())
+
+
 class RayPPOTrainer:
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -444,6 +716,15 @@ class RayPPOTrainer:
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.GRPO_WITH_FILTERED_SFT,
             AdvantageEstimator.MAXRL,
+            AdvantageEstimator.COST_AWARE_MAXRL,
+            AdvantageEstimator.RB_COST_AWARE_MAXRL,
+            AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+            AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
             AdvantageEstimator.PKPO,
             AdvantageEstimator.MACLAURIN,
             AdvantageEstimator.CROSS_FITTED_MACLAURIN,
@@ -583,6 +864,30 @@ class RayPPOTrainer:
             assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None, "tool_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
 
+        rollout_dataset_config = config.trainer.get("rollout_dataset", {})
+        rollout_dataset_enabled = rollout_dataset_config.get("enabled", False)
+        if not isinstance(rollout_dataset_enabled, bool):
+            raise TypeError("trainer.rollout_dataset.enabled must be a boolean")
+        if rollout_dataset_enabled:
+            repo_id = rollout_dataset_config.get("hub_repo_id")
+            if not isinstance(repo_id, str) or repo_id.count("/") != 1:
+                raise ValueError(
+                    "trainer.rollout_dataset.hub_repo_id must have the form owner/name when enabled"
+                )
+            local_dir = rollout_dataset_config.get("local_dir")
+            if local_dir is not None and not isinstance(local_dir, str):
+                raise TypeError("trainer.rollout_dataset.local_dir must be null or a string")
+            private = rollout_dataset_config.get("private", False)
+            if not isinstance(private, bool):
+                raise TypeError("trainer.rollout_dataset.private must be a boolean")
+            upload_num_workers = rollout_dataset_config.get("upload_num_workers", 4)
+            if (
+                not isinstance(upload_num_workers, int)
+                or isinstance(upload_num_workers, bool)
+                or upload_num_workers < 1
+            ):
+                raise ValueError("trainer.rollout_dataset.upload_num_workers must be positive")
+
         print("[validate_config] All configuration checks passed successfully!")
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
@@ -676,6 +981,103 @@ class RayPPOTrainer:
             f.write("\n".join(lines) + "\n")
 
         print(f"Dumped generations to {filename}")
+
+    def _rollout_dataset_config(self):
+        config = getattr(self, "config", None)
+        if config is None or not hasattr(config, "trainer"):
+            return {}
+        return config.trainer.get("rollout_dataset", {})
+
+    def _rollout_dataset_enabled(self) -> bool:
+        return bool(self._rollout_dataset_config().get("enabled", False))
+
+    def _rollout_dataset_local_dir(self) -> str:
+        rollout_dataset_config = self._rollout_dataset_config()
+        local_dir = rollout_dataset_config.get("local_dir")
+        if local_dir:
+            return os.path.abspath(os.path.expanduser(local_dir))
+        return os.path.join(
+            os.path.abspath(os.path.expanduser(self.config.trainer.default_local_dir)),
+            "rollout_dataset",
+        )
+
+    def _dump_training_rollout_dataset(self, batch, reward_extra_infos_dict) -> None:
+        inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        scores = batch.batch["token_level_scores"].sum(-1).detach().cpu().tolist()
+        response_mask = batch.batch["response_mask"].bool()
+        max_response_length = batch.batch["responses"].shape[-1]
+        prompt_mask = batch.batch["attention_mask"][:, :-max_response_length].bool()
+
+        reserved_columns = {"input", "output", "rollout_index", "score", "step"}
+        extra_fields = {
+            key: values
+            for key, values in reward_extra_infos_dict.items()
+            if key not in reserved_columns
+        }
+        for key in ("uid", "data_source", "ability", "id", "reward_model", "extra_info"):
+            values = batch.non_tensor_batch.get(key)
+            if values is not None:
+                extra_fields.setdefault(key, values)
+
+        extra_fields["prompt_tokens"] = prompt_mask.sum(-1).detach().cpu().tolist()
+        extra_fields["response_tokens"] = response_mask.sum(-1).detach().cpu().tolist()
+        for field_name, tensor_name in (("advantage", "advantages"), ("return", "returns")):
+            values = batch.batch.get(tensor_name)
+            if values is None:
+                continue
+            sequence_values = (values.float() * response_mask).sum(-1) / response_mask.sum(-1).clamp_min(1)
+            extra_fields[field_name] = sequence_values.detach().cpu().tolist()
+
+        output_path = dump_rollout_step(
+            self._rollout_dataset_local_dir(),
+            step=self.global_steps,
+            inputs=inputs,
+            outputs=outputs,
+            scores=scores,
+            extra_fields=extra_fields,
+        )
+        print(f"Dumped training rollouts to {output_path}")
+
+    def _upload_rollout_dataset_if_enabled(self) -> Optional[str]:
+        if not self._rollout_dataset_enabled():
+            return None
+
+        rollout_dataset_config = self._rollout_dataset_config()
+        advantage_estimator = OmegaConf.select(self.config, "algorithm.adv_estimator")
+        metadata = {
+            "advantage_estimator": str(advantage_estimator),
+            "experiment_name": self.config.trainer.experiment_name,
+            "project_name": self.config.trainer.project_name,
+            "total_training_steps": int(self.total_training_steps),
+            "wandb_run_id": self.wandb_id,
+        }
+        dataset_url = upload_rollout_dataset_to_hf(
+            self._rollout_dataset_local_dir(),
+            repo_id=rollout_dataset_config.get("hub_repo_id"),
+            private=rollout_dataset_config.get("private", False),
+            num_workers=rollout_dataset_config.get("upload_num_workers", 4),
+            metadata=metadata,
+        )
+        self.rollout_dataset_url = dataset_url
+        print(f"Verified rollout dataset upload: {dataset_url}")
+        return dataset_url
+
+    def _save_shortest_rollout(self, batch: DataProto) -> str:
+        """Append the globally shortest rollout for this training step."""
+        filename = os.path.join(
+            self.config.trainer.default_local_dir,
+            "debug",
+            "shortest_rollouts.jsonl",
+        )
+        record = build_shortest_rollout_record(
+            data=batch,
+            tokenizer=self.tokenizer,
+            global_step=self.global_steps,
+        )
+        record["experiment_name"] = str(self.config.trainer.experiment_name)
+        append_shortest_rollout_record(filename, record)
+        return filename
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -1559,6 +1961,29 @@ class RayPPOTrainer:
         metrics.update(global_balance_stats)
 
     def fit(self):
+        """Run training and deterministically finalize experiment tracking."""
+        try:
+            self._run_training_loop()
+            self._upload_rollout_dataset_if_enabled()
+        except BaseException:
+            try:
+                self._finish_tracking(exit_code=1)
+            except Exception as error:
+                print(f"Failed to finalize experiment tracking after a training error: {error}")
+            raise
+        else:
+            self._finish_tracking(exit_code=0)
+
+    def _finish_tracking(self, exit_code: int) -> None:
+        tracking = getattr(self, "_tracking", None)
+        if tracking is None:
+            return
+        try:
+            tracking.finish(exit_code=exit_code)
+        finally:
+            self._tracking = None
+
+    def _run_training_loop(self):
         """
         The training loop of PPO.
         The driver process only need to call the compute functions of the worker group through RPC
@@ -1580,9 +2005,6 @@ class RayPPOTrainer:
         if isinstance(self.config.resume_training_parameters.wandb_id_to_resume, str):
             self.wandb_id = self.config.resume_training_parameters.wandb_id_to_resume
 
-        # NOTE: for now, we just force wandb logging in a new run
-        self.wandb_id = None
-
         # Setup logging
         logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -1591,6 +2013,7 @@ class RayPPOTrainer:
             previous_run_id=self.wandb_id,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        self._tracking = logger
 
         if self.wandb_id is None:
             self.wandb_id = logger.wandb_id
@@ -1827,6 +2250,23 @@ class RayPPOTrainer:
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
                             config=self.config.algorithm,
                         )
+                        cost_aware_maxrl_metrics = batch.meta_info.pop("cost_aware_maxrl_metrics", None)
+                        if cost_aware_maxrl_metrics is not None:
+                            metrics.update(cost_aware_maxrl_metrics)
+                        rb_cost_aware_maxrl_metrics = batch.meta_info.pop("rb_cost_aware_maxrl_metrics", None)
+                        if rb_cost_aware_maxrl_metrics is not None:
+                            metrics.update(rb_cost_aware_maxrl_metrics)
+                        fixed_n_rb_marginrl_metrics = batch.meta_info.pop("fixed_n_rb_marginrl_metrics", None)
+                        if fixed_n_rb_marginrl_metrics is not None:
+                            metrics.update(fixed_n_rb_marginrl_metrics)
+                        if self.config.algorithm.get("save_shortest_rollout", False):
+                            try:
+                                self._save_shortest_rollout(batch)
+                            except Exception as error:
+                                print(
+                                    "Failed to save the globally shortest rollout "
+                                    f"at step {self.global_steps}: {error}"
+                                )
 
                     # update critic
                     if self.use_critic:
@@ -1883,20 +2323,27 @@ class RayPPOTrainer:
                                 )
 
                     # Log rollout generations if enabled
+                    rollout_dataset_enabled = self._rollout_dataset_enabled()
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
-                    if rollout_data_dir:
+                    if rollout_dataset_enabled or rollout_data_dir:
                         with marked_timer("dump_rollout_generations", timing_raw, color="green"):
-                            print(batch.batch.keys())
-                            inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
-                            outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                            scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
-                            self._dump_generations(
-                                inputs=inputs,
-                                outputs=outputs,
-                                scores=scores,
-                                reward_extra_infos_dict=reward_extra_infos_dict,
-                                dump_path=rollout_data_dir,
-                            )
+                            if rollout_dataset_enabled:
+                                self._dump_training_rollout_dataset(batch, reward_extra_infos_dict)
+                            else:
+                                inputs = self.tokenizer.batch_decode(
+                                    batch.batch["prompts"], skip_special_tokens=True
+                                )
+                                outputs = self.tokenizer.batch_decode(
+                                    batch.batch["responses"], skip_special_tokens=True
+                                )
+                                scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                                self._dump_generations(
+                                    inputs=inputs,
+                                    outputs=outputs,
+                                    scores=scores,
+                                    reward_extra_infos_dict=reward_extra_infos_dict,
+                                    dump_path=rollout_data_dir,
+                                )
 
                     # validate
                     validate_on_last_step = (

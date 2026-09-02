@@ -3,18 +3,22 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import List, Dict, Any, Tuple, Set, Optional
-import time
 import signal
+import time
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import ray
 import torch
 from math_verify import verify
 
 from verl import DataProto
-from verl.workers.reward_manager import register
 from verl.utils.reward_score.math_verify import extract_solution
+from verl.utils.reward_score.thinking_efficiency import (
+    analyze_thinking_efficiency,
+    gate_correctness_reward,
+)
+from verl.workers.reward_manager import register
 
 # -----------------------------------------------------------------------------
 # math_verify imports
@@ -183,6 +187,7 @@ class MultiThreadNaiveRewardManager:
         timeout_score: float = 0.0,
         zero_reward_on_max_response_length: bool = False,
         max_resp_len: Optional[int] = None,
+        post_think_pre_box_token_limit: Optional[int] = None,
     ):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -197,6 +202,15 @@ class MultiThreadNaiveRewardManager:
             zero_reward_on_max_response_length = zero_reward_on_max_response_length.lower() in ("1", "true", "yes", "y")
         self._zero_reward_on_max_response_length = bool(zero_reward_on_max_response_length)
         self._max_resp_len = int(max_resp_len) if max_resp_len is not None else None
+        if post_think_pre_box_token_limit is None:
+            self._post_think_pre_box_token_limit = None
+        else:
+            if isinstance(post_think_pre_box_token_limit, bool):
+                raise ValueError("post_think_pre_box_token_limit must be a positive integer")
+            token_limit = int(post_think_pre_box_token_limit)
+            if token_limit <= 0 or token_limit != post_think_pre_box_token_limit:
+                raise ValueError("post_think_pre_box_token_limit must be a positive integer")
+            self._post_think_pre_box_token_limit = token_limit
 
         if isinstance(num_reward_actors, int):
             self.num_reward_actors = num_reward_actors
@@ -365,6 +379,12 @@ class MultiThreadNaiveRewardManager:
 
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_resp_ids, skip_special_tokens=True)
+            thinking_efficiency = None
+            if self._post_think_pre_box_token_limit is not None:
+                thinking_efficiency = analyze_thinking_efficiency(
+                    token_ids=valid_resp_ids.tolist(),
+                    tokenizer=self.tokenizer,
+                )
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
@@ -379,6 +399,7 @@ class MultiThreadNaiveRewardManager:
                     prompt_key=prompt_key,
                     prompt_str=prompt_str,
                     valid_resp_len=valid_resp_len,
+                    thinking_efficiency=thinking_efficiency,
                 )
             )
 
@@ -471,6 +492,38 @@ class MultiThreadNaiveRewardManager:
 
             if self._zero_reward_on_max_response_length:
                 reward_extra_info["zeroed_by_max_response_length"].append(float(zeroed_by_max_response_length))
+            thinking_efficiency = info["thinking_efficiency"]
+            if thinking_efficiency is not None:
+                raw_math_accuracy = float(out["accuracy"])
+                gated_score = gate_correctness_reward(
+                    correctness=float(out["score"]),
+                    stats=thinking_efficiency,
+                    post_think_pre_box_token_limit=self._post_think_pre_box_token_limit,
+                )
+                post_think_tokens = thinking_efficiency.post_think_pre_box_tokens
+                length_gate_pass = (
+                    thinking_efficiency.has_think_open
+                    and thinking_efficiency.has_think_close
+                    and thinking_efficiency.has_box_after_think
+                    and post_think_tokens is not None
+                    and post_think_tokens < self._post_think_pre_box_token_limit
+                )
+                out = {**out, "score": gated_score}
+                reward_extra_info["raw_math_accuracy"].append(raw_math_accuracy)
+                reward_extra_info["thinking_tokens"].append(thinking_efficiency.thinking_tokens)
+                reward_extra_info["post_think_pre_box_tokens"].append(
+                    -1 if post_think_tokens is None else post_think_tokens
+                )
+                reward_extra_info["has_think_open"].append(float(thinking_efficiency.has_think_open))
+                reward_extra_info["has_think_close"].append(float(thinking_efficiency.has_think_close))
+                reward_extra_info["has_box_after_think"].append(
+                    float(thinking_efficiency.has_box_after_think)
+                )
+                reward_extra_info["thinking_span_censored"].append(
+                    float(thinking_efficiency.thinking_span_censored)
+                )
+                reward_extra_info["post_think_length_pass"].append(float(length_gate_pass))
+                reward_extra_info["gated_reward"].append(gated_score)
             reward_tensor[i, info["valid_resp_len"] - 1] = float(out["score"])
 
             ds = info["data_source"]

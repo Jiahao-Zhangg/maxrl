@@ -870,6 +870,26 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
+  # Reference length for normalized cost estimators; normally max_response_length / 2
+  cost_reference_tokens: null
+
+  # Maximum inverse cost; for fixed-N capped costs this implies minimum cost 1 / cap
+  max_inverse_cost: 4.0
+
+  # Detached constant rate estimate used by fixed-q capped fixed-N RB MarginRL
+  fixed_q_hat: 2.0
+
+  # Numerical stabilizer added to each prompt group's response-length standard deviation
+  efficient_reasoning_epsilon: 1.0e-7
+
+  # Optional detached constant q-hat for Efficient-Reasoning cost; null uses M / sum(cost)
+  efficient_reasoning_fixed_q_hat: null
+  # Append the globally shortest training rollout from every round to a JSONL debug log
+  save_shortest_rollout: False
+
+  # Maximum trajectory cost used to map RB cost-aware MaxRL lengths into [0, 1]
+  rb_cost_max_tokens: null
+
   # Pass@K value for PKPO advantage estimator
   # Used when adv_estimator is "pkpo"
   pass_k: 1
@@ -982,6 +1002,17 @@ trainer:
 
   # Directory for logging rollout data; no dump if null
   rollout_data_dir: null
+
+  # Save every completed training-step rollout and upload the complete run as
+  # a Hugging Face dataset. Disabled runs retain the legacy rollout_data_dir behavior.
+  rollout_dataset:
+    enabled: false
+    # Defaults to ${trainer.default_local_dir}/rollout_dataset when null.
+    local_dir: null
+    # Required when enabled, in owner/name form.
+    hub_repo_id: null
+    private: false
+    upload_num_workers: 4
 
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
