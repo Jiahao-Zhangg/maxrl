@@ -129,6 +129,9 @@ class AdvantageEstimator(str, Enum):
     FIXED_N_RB_COST_AWARE_MARGINRL = "fixed_n_rb_cost_aware_marginrl"
     FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED = "fixed_n_rb_cost_aware_marginrl_success_gated"
     FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL = "fixed_n_rb_capped_cost_aware_marginrl"
+    FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL = (
+        "fixed_n_rb_capped_thinking_cost_aware_marginrl"
+    )
     FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL = "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
     FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL = "fixed_n_rb_efficient_reasoning_cost_marginrl"
     FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED = (
@@ -710,6 +713,47 @@ def compute_fixed_n_rb_capped_marginrl_costs(
     if torch.any(trajectory_lengths <= 0).item():
         raise ValueError("fixed-N trajectories must contain at least one response token")
 
+    return compute_fixed_n_rb_capped_marginrl_costs_from_lengths(
+        trajectory_lengths=trajectory_lengths,
+        cost_reference_tokens=cost_reference_tokens,
+        max_inverse_cost=max_inverse_cost,
+    )
+
+
+def compute_fixed_n_rb_capped_marginrl_costs_from_lengths(
+    trajectory_lengths: torch.Tensor,
+    cost_reference_tokens: float,
+    max_inverse_cost: float = 4.0,
+):
+    """Normalize explicit trajectory span lengths and floor cost at ``1/cap``."""
+
+    if trajectory_lengths.ndim != 1:
+        raise ValueError(
+            "trajectory_lengths must be rank 1, "
+            f"got shape {tuple(trajectory_lengths.shape)}"
+        )
+
+    trajectory_lengths = trajectory_lengths.detach().to(dtype=torch.float32)
+    if (
+        not torch.isfinite(trajectory_lengths).all().item()
+        or torch.any(trajectory_lengths < 0).item()
+    ):
+        raise ValueError("trajectory_lengths must be finite and nonnegative")
+
+    cost_reference_tokens = float(cost_reference_tokens)
+    if not math.isfinite(cost_reference_tokens) or cost_reference_tokens <= 0:
+        raise ValueError(
+            "cost_reference_tokens must be finite and positive, "
+            f"got {cost_reference_tokens}"
+        )
+
+    max_inverse_cost = float(max_inverse_cost)
+    if not math.isfinite(max_inverse_cost) or max_inverse_cost <= 0:
+        raise ValueError(
+            "max_inverse_cost must be finite and positive, "
+            f"got {max_inverse_cost}"
+        )
+
     raw_costs = trajectory_lengths / cost_reference_tokens
     minimum_cost = 1.0 / max_inverse_cost
     inverse_cost_cap_mask = raw_costs < minimum_cost
@@ -1018,6 +1062,56 @@ def compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage(
         response_mask=cost_mask,
         cost_reference_tokens=cost_reference_tokens,
         max_inverse_cost=max_inverse_cost,
+    )
+    return compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_costs=trajectory_costs,
+        trajectory_lengths=trajectory_lengths,
+        inverse_cost_cap_mask=inverse_cost_cap_mask,
+        expected_group_size=expected_group_size,
+        return_diagnostics=return_diagnostics,
+        **kwargs,
+    )
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL)
+def compute_fixed_n_rb_capped_thinking_cost_aware_marginrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_lengths: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    config=None,
+    cost_reference_tokens: Optional[float] = None,
+    max_inverse_cost: float = 4.0,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Use boundary-exclusive ``<think>...</think>`` token counts as cost."""
+
+    if config is not None:
+        cost_reference_tokens = config.get("cost_reference_tokens", cost_reference_tokens)
+        max_inverse_cost = config.get("max_inverse_cost", max_inverse_cost)
+    if cost_reference_tokens is None:
+        raise ValueError(
+            "cost_reference_tokens is required for "
+            "fixed_n_rb_capped_thinking_cost_aware_marginrl"
+        )
+    if trajectory_lengths is None:
+        raise ValueError(
+            "thinking-token trajectory_lengths are required for "
+            "fixed_n_rb_capped_thinking_cost_aware_marginrl"
+        )
+
+    trajectory_lengths = trajectory_lengths.to(device=response_mask.device)
+    trajectory_lengths, trajectory_costs, inverse_cost_cap_mask = (
+        compute_fixed_n_rb_capped_marginrl_costs_from_lengths(
+            trajectory_lengths=trajectory_lengths,
+            cost_reference_tokens=cost_reference_tokens,
+            max_inverse_cost=max_inverse_cost,
+        )
     )
     return compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
         token_level_rewards=token_level_rewards,

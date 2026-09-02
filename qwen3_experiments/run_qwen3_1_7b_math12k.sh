@@ -502,6 +502,7 @@ elif [[ "${ADVANTAGE_ESTIMATOR}" == "rb_cost_aware_maxrl" ]]; then
     echo "RB cost-aware MaxRL: cost_max_tokens=${RB_COST_MAX_TOKENS}, zero-success update=zero"
 elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_cost_aware_marginrl"
+    || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_thinking_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_fixed_q_cost_aware_marginrl"
 ]]; then
     if [[ "${LOSS_AGG_MODE}" != "token-mean" && "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
@@ -518,6 +519,8 @@ elif [[
         FIXED_Q_HAT=${MAXRL_FIXED_Q_HAT:-2.0}
         ALGORITHM_OVERRIDES+=("algorithm.fixed_q_hat=${FIXED_Q_HAT}")
         echo "Fixed-q capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=${FIXED_Q_HAT}"
+    elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_thinking_cost_aware_marginrl" ]]; then
+        echo "Thinking-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens strictly inside think tags/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=M/sum(cost)"
     else
         echo "Capped-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=max(tokens/${COST_REFERENCE_TOKENS},1/${MAX_INVERSE_COST}), q_hat=M/sum(cost)"
     fi

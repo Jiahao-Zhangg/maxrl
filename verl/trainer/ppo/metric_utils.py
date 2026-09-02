@@ -345,6 +345,93 @@ def compute_fixed_n_rb_cost_aware_marginrl_metrics(
     }
 
 
+def compute_thinking_efficiency_reward_metrics(
+    raw_math_accuracy,
+    post_think_pre_box_tokens,
+    has_think_open,
+    has_think_close,
+    has_box_after_think,
+    thinking_span_censored,
+    post_think_length_pass,
+    gated_reward,
+    metric_prefix: str = "fixed_n_rb_capped_thinking_marginrl",
+) -> Dict[str, float]:
+    """Summarize marker coverage and the concise-answer reward gate."""
+    if not metric_prefix:
+        raise ValueError("thinking-efficiency metric prefix must be nonempty")
+
+    def as_vector(name: str, values) -> torch.Tensor:
+        tensor = torch.as_tensor(values, dtype=torch.float32)
+        if tensor.ndim != 1 or tensor.numel() == 0:
+            raise ValueError(
+                f"{name} must be a nonempty rank-1 vector, got {tuple(tensor.shape)}"
+            )
+        if not torch.isfinite(tensor).all().item():
+            raise ValueError(f"{name} must contain only finite values")
+        return tensor
+
+    raw_accuracy = as_vector("raw_math_accuracy", raw_math_accuracy)
+    post_tokens = as_vector(
+        "post_think_pre_box_tokens", post_think_pre_box_tokens
+    )
+    open_mask = as_vector("has_think_open", has_think_open)
+    close_mask = as_vector("has_think_close", has_think_close)
+    box_mask = as_vector("has_box_after_think", has_box_after_think)
+    censored_mask = as_vector("thinking_span_censored", thinking_span_censored)
+    length_pass = as_vector("post_think_length_pass", post_think_length_pass)
+    rewards = as_vector("gated_reward", gated_reward)
+
+    vectors = (
+        post_tokens,
+        open_mask,
+        close_mask,
+        box_mask,
+        censored_mask,
+        length_pass,
+        rewards,
+    )
+    if any(vector.shape != raw_accuracy.shape for vector in vectors):
+        raise ValueError("thinking-efficiency diagnostics must have matching shapes")
+
+    valid_post_tokens = post_tokens[post_tokens >= 0]
+    raw_successes = raw_accuracy.sum().item()
+    reward_retention = rewards.sum().item() / raw_successes if raw_successes > 0 else 0.0
+
+    metrics = {
+        f"{metric_prefix}/raw_math_accuracy_mean": raw_accuracy.mean().item(),
+        f"{metric_prefix}/raw_math_accuracy_std": raw_accuracy.std(unbiased=False).item(),
+        f"{metric_prefix}/gated_reward_mean": rewards.mean().item(),
+        f"{metric_prefix}/gated_reward_std": rewards.std(unbiased=False).item(),
+        f"{metric_prefix}/correct_reward_retention": reward_retention,
+        f"{metric_prefix}/think_open_rate": open_mask.mean().item(),
+        f"{metric_prefix}/think_close_rate": close_mask.mean().item(),
+        f"{metric_prefix}/box_after_think_rate": box_mask.mean().item(),
+        f"{metric_prefix}/thinking_span_censored_rate": censored_mask.mean().item(),
+        f"{metric_prefix}/post_think_length_pass_rate": length_pass.mean().item(),
+    }
+    if valid_post_tokens.numel() == 0:
+        metrics.update(
+            {
+                f"{metric_prefix}/post_think_pre_box_tokens_mean": 0.0,
+                f"{metric_prefix}/post_think_pre_box_tokens_std": 0.0,
+                f"{metric_prefix}/post_think_pre_box_tokens_max": 0.0,
+                f"{metric_prefix}/post_think_pre_box_tokens_min": 0.0,
+            }
+        )
+    else:
+        metrics.update(
+            {
+                f"{metric_prefix}/post_think_pre_box_tokens_mean": valid_post_tokens.mean().item(),
+                f"{metric_prefix}/post_think_pre_box_tokens_std": valid_post_tokens.std(
+                    unbiased=False
+                ).item(),
+                f"{metric_prefix}/post_think_pre_box_tokens_max": valid_post_tokens.max().item(),
+                f"{metric_prefix}/post_think_pre_box_tokens_min": valid_post_tokens.min().item(),
+            }
+        )
+    return metrics
+
+
 def compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics(
     trajectory_relative_lengths: torch.Tensor,
     group_length_means: torch.Tensor,

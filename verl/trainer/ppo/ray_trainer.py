@@ -49,6 +49,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_fixed_n_rb_cost_aware_marginrl_metrics,
     compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics,
     compute_rb_cost_aware_maxrl_metrics,
+    compute_thinking_efficiency_reward_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
     process_validation_metrics,
@@ -339,6 +340,7 @@ def compute_advantage(
         AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
         AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+        AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
@@ -356,6 +358,10 @@ def compute_advantage(
         capped_cost = (
             adv_estimator
             == AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL
+        )
+        thinking_cost = (
+            adv_estimator
+            == AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL
         )
         capped_fixed_q = (
             adv_estimator
@@ -381,10 +387,34 @@ def compute_advantage(
             advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_success_gated_outcome_advantage
         elif capped_fixed_q:
             advantage_fn = core_algos.compute_fixed_n_rb_capped_fixed_q_cost_aware_marginrl_outcome_advantage
+        elif thinking_cost:
+            advantage_fn = (
+                core_algos.compute_fixed_n_rb_capped_thinking_cost_aware_marginrl_outcome_advantage
+            )
         elif capped_cost:
             advantage_fn = core_algos.compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage
         else:
             advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage
+
+        advantage_kwargs = {}
+        if thinking_cost:
+            if "thinking_tokens" not in data.non_tensor_batch:
+                raise ValueError(
+                    "fixed_n_rb_capped_thinking_cost_aware_marginrl requires "
+                    "thinking_tokens from the reward manager"
+                )
+            thinking_lengths = torch.as_tensor(
+                data.non_tensor_batch["thinking_tokens"],
+                dtype=torch.float32,
+                device=calculation_mask.device,
+            )
+            if thinking_lengths.ndim != 1 or thinking_lengths.shape[0] != calculation_mask.shape[0]:
+                raise ValueError(
+                    "thinking_tokens must contain one value per trajectory; "
+                    f"got {tuple(thinking_lengths.shape)} for batch size "
+                    f"{calculation_mask.shape[0]}"
+                )
+            advantage_kwargs["trajectory_lengths"] = thinking_lengths
         advantages, returns, diagnostics = advantage_fn(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=calculation_mask,
@@ -393,6 +423,7 @@ def compute_advantage(
             expected_group_size=num_repeat,
             config=config,
             return_diagnostics=True,
+            **advantage_kwargs,
         )
         if efficient_reasoning_success_gated:
             metric_prefix = "fixed_n_rb_er_cost_marginrl_success_gated"
@@ -402,6 +433,8 @@ def compute_advantage(
             metric_prefix = "fixed_n_rb_marginrl_success_gated"
         elif capped_fixed_q:
             metric_prefix = "fixed_n_rb_capped_fixed_q_marginrl"
+        elif thinking_cost:
+            metric_prefix = "fixed_n_rb_capped_thinking_marginrl"
         elif capped_cost:
             metric_prefix = "fixed_n_rb_capped_marginrl"
         else:
@@ -415,6 +448,34 @@ def compute_advantage(
             marginrl_metrics = compute_fixed_n_rb_cost_aware_marginrl_metrics(
                 **diagnostics,
                 metric_prefix=metric_prefix,
+            )
+        if thinking_cost:
+            required_reward_metrics = (
+                "raw_math_accuracy",
+                "post_think_pre_box_tokens",
+                "has_think_open",
+                "has_think_close",
+                "has_box_after_think",
+                "thinking_span_censored",
+                "post_think_length_pass",
+                "gated_reward",
+            )
+            missing_metrics = [
+                key for key in required_reward_metrics if key not in data.non_tensor_batch
+            ]
+            if missing_metrics:
+                raise ValueError(
+                    "thinking-cost reward diagnostics are missing: "
+                    f"{missing_metrics}"
+                )
+            marginrl_metrics.update(
+                compute_thinking_efficiency_reward_metrics(
+                    **{
+                        key: data.non_tensor_batch[key]
+                        for key in required_reward_metrics
+                    },
+                    metric_prefix=metric_prefix,
+                )
             )
         data.meta_info["fixed_n_rb_marginrl_metrics"] = marginrl_metrics
         data.batch["advantages"] = advantages
@@ -660,6 +721,7 @@ class RayPPOTrainer:
             AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
             AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
+            AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_EFFICIENT_REASONING_COST_MARGINRL_SUCCESS_GATED,
