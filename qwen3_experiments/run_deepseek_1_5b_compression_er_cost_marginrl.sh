@@ -138,9 +138,9 @@ TRAIN_CMD=(
     actor_rollout_ref.rollout.multi_turn.enable=false
     reward_model.reward_manager=multi_thread
     "+reward_model.reward_kwargs.num_reward_actors=${VERIFIER_WORKERS}"
-    # Give no correctness reward to responses that exhaust the output budget.
-    +reward_model.reward_kwargs.zero_reward_on_max_response_length=true
-    "+reward_model.reward_kwargs.max_resp_len=${MAX_RESPONSE_LENGTH}"
+    # Require EOS in the generated response, matching the ER reward server.
+    +reward_model.reward_kwargs.check_eos=true
+    +reward_model.reward_kwargs.zero_reward_on_max_response_length=false
     trainer.balance_batch=true
     trainer.critic_warmup=0
     trainer.val_before_train=false
@@ -175,6 +175,7 @@ echo "Fixed-N RB MarginRL: q_hat=M/sum(cost); failure advantage=-q_hat*cost/(M+1
 echo "32 prompts x 16 responses = 512 responses/update; 1 update/step; 100 steps in 1 epoch."
 echo "Prompt cap: ${MAX_PROMPT_LENGTH}; output cap: ${MAX_RESPONSE_LENGTH}; context: ${MAX_MODEL_LENGTH}."
 echo "LR: 1e-6; warmup: 3 steps; KL: 0; checkpoints at steps 20, 40, 60, 80, 100."
+echo "Reward completion check: responses must contain EOS; missing EOS receives zero reward."
 echo "Checkpoints: ${CKPT_PATH}"
 if [[ "${DRY_RUN}" == "1" ]]; then
     printf 'Prepare command:\n'

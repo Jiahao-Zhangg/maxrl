@@ -188,6 +188,7 @@ class MultiThreadNaiveRewardManager:
         zero_reward_on_max_response_length: bool = False,
         max_resp_len: Optional[int] = None,
         post_think_pre_box_token_limit: Optional[int] = None,
+        check_eos: bool = False,
     ):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -202,6 +203,12 @@ class MultiThreadNaiveRewardManager:
             zero_reward_on_max_response_length = zero_reward_on_max_response_length.lower() in ("1", "true", "yes", "y")
         self._zero_reward_on_max_response_length = bool(zero_reward_on_max_response_length)
         self._max_resp_len = int(max_resp_len) if max_resp_len is not None else None
+        if isinstance(check_eos, str):
+            check_eos = check_eos.lower() in ("1", "true", "yes", "y")
+        self._check_eos = bool(check_eos)
+        self._eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if self._check_eos and self._eos_token_id is None:
+            raise ValueError("check_eos requires tokenizer.eos_token_id")
         if post_think_pre_box_token_limit is None:
             self._post_think_pre_box_token_limit = None
         else:
@@ -338,11 +345,24 @@ class MultiThreadNaiveRewardManager:
         return ans.strip()
 
     def __call__(self, data: DataProto, return_dict: bool = False):
+        missing_eos = None
+        if self._check_eos:
+            responses = data.batch["responses"]
+            response_attention_mask = data.batch["attention_mask"][:, -responses.shape[-1]:].bool()
+            # Match ER's contains-EOS check, excluding prompt and padding tokens.
+            missing_eos = ~(responses.eq(self._eos_token_id) & response_attention_mask).any(dim=-1)
+
         # preserve shortcut behavior
         if "rm_scores" in data.batch.keys():
+            reward_tensor = data.batch["rm_scores"]
+            if missing_eos is not None:
+                reward_tensor = reward_tensor.masked_fill(missing_eos.unsqueeze(-1), 0.0)
             if return_dict:
-                return {"reward_tensor": data.batch["rm_scores"]}
-            return data.batch["rm_scores"]
+                result = {"reward_tensor": reward_tensor}
+                if missing_eos is not None:
+                    result["reward_extra_info"] = {"zeroed_by_missing_eos": missing_eos.float().tolist()}
+                return result
+            return reward_tensor
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info: Dict[str, list] = defaultdict(list)
@@ -400,6 +420,7 @@ class MultiThreadNaiveRewardManager:
                     prompt_str=prompt_str,
                     valid_resp_len=valid_resp_len,
                     thinking_efficiency=thinking_efficiency,
+                    missing_eos=bool(missing_eos[i].item()) if missing_eos is not None else False,
                 )
             )
 
@@ -407,7 +428,9 @@ class MultiThreadNaiveRewardManager:
         pending: Set[ray.ObjectRef] = set()
         start_time: Dict[ray.ObjectRef, float] = {}
         ref_to_batch: Dict[ray.ObjectRef, List[int]] = {}
-        results: Dict[int, Dict[str, float]] = {}
+        results: Dict[int, Dict[str, float]] = {
+            i: {"score": 0.0, "accuracy": 0.0} for i, info in enumerate(items) if info["missing_eos"]
+        }
 
         next_i = 0
 
@@ -418,8 +441,11 @@ class MultiThreadNaiveRewardManager:
 
             batch: List[int] = []
             while next_i < n and len(batch) < self._batch_size:
-                batch.append(next_i)
+                if not items[next_i]["missing_eos"]:
+                    batch.append(next_i)
                 next_i += 1
+            if not batch:
+                return
 
             payload = [(i, items[i]["response"], items[i]["ground_truth"]) for i in batch]
             ref = self._pick_actor().compute_scores_batch.remote(
@@ -487,11 +513,14 @@ class MultiThreadNaiveRewardManager:
             out = results.get(i, {"score": self._timeout_score, "accuracy": 0.0})
             is_max_response_length = info["valid_resp_len"].item() >= (self._max_resp_len or data.batch["responses"].shape[-1])
             zeroed_by_max_response_length = self._zero_reward_on_max_response_length and is_max_response_length
-            if zeroed_by_max_response_length:
+            invalid_response = zeroed_by_max_response_length or info["missing_eos"]
+            if invalid_response:
                 out = {"score": 0.0, "accuracy": 0.0}
 
             if self._zero_reward_on_max_response_length:
                 reward_extra_info["zeroed_by_max_response_length"].append(float(zeroed_by_max_response_length))
+            if self._check_eos:
+                reward_extra_info["zeroed_by_missing_eos"].append(float(info["missing_eos"]))
             thinking_efficiency = info["thinking_efficiency"]
             if thinking_efficiency is not None:
                 raw_math_accuracy = float(out["accuracy"])
@@ -547,10 +576,10 @@ class MultiThreadNaiveRewardManager:
             response_str = info["response"]
 
             # Extract prediction answer
-            pred_ans = None if zeroed_by_max_response_length else self._extract_answer(response_str)
+            pred_ans = None if invalid_response else self._extract_answer(response_str)
             if pred_ans is not None:
                 prompt_to_answers[ds][pk].append(self._normalize_answer(pred_ans))
-            elif zeroed_by_max_response_length:
+            elif invalid_response:
                 prompt_to_answers[ds].setdefault(pk, [])
 
             # Extract & store GT answer once per prompt
