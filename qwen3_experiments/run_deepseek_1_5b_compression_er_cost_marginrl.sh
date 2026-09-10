@@ -164,12 +164,18 @@ TRAIN_CMD=(
     +actor_rollout_ref.rollout.min_p=0.0
     +actor_rollout_ref.rollout.seed=42
     actor_rollout_ref.rollout.ignore_eos=false
+    # Match ER's terminal-EOS postprocessing, including length-capped outputs.
+    actor_rollout_ref.rollout.force_eos=true
+    actor_rollout_ref.rollout.calculate_log_probs=false
     actor_rollout_ref.rollout.multi_turn.enable=false
     reward_model.reward_manager=multi_thread
     "+reward_model.reward_kwargs.num_reward_actors=${VERIFIER_WORKERS}"
-    # Require EOS in the generated response, matching the ER reward server.
+    # Check EOS after postprocessing, then grade only the response text.
     +reward_model.reward_kwargs.check_eos=true
     +reward_model.reward_kwargs.zero_reward_on_max_response_length=false
+    # Disable MaxRL's outer deadlines; retain MathVerify's internal behavior.
+    +reward_model.reward_kwargs.per_item_timeout_s=0
+    +reward_model.reward_kwargs.per_batch_timeout_s=0
     trainer.balance_batch=true
     trainer.critic_warmup=0
     trainer.val_before_train=false
@@ -213,7 +219,8 @@ echo "Fixed-N RB MarginRL: q_hat=M/sum(cost); failure advantage=-q_hat*cost/(M+1
 echo "32 prompts x 16 responses = 512 responses/update; 1 update/step; 100 steps in 1 epoch."
 echo "Prompt cap: ${MAX_PROMPT_LENGTH}; output cap: ${MAX_RESPONSE_LENGTH}; context: ${MAX_MODEL_LENGTH}."
 echo "LR: 1e-6; warmup: 3 steps; KL: 0; checkpoints at steps 20, 40, 60, 80, 100."
-echo "Reward completion check: responses must contain EOS; missing EOS receives zero reward."
+echo "Rollout postprocessing: write terminal EOS, including at the 32000-token cap."
+echo "Grader: response text only; EOS check enabled; no outer item/batch timeout (MathVerify internals unchanged)."
 echo "Checkpoints: ${CKPT_PATH}"
 if [[ "${SAVE_ROLLOUT_DATASET}" == "true" ]]; then
     echo "Training rollouts: all 512 responses/step saved under ${ROLLOUT_DATASET_DIR}/data/."

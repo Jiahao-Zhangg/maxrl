@@ -164,3 +164,69 @@ def test_eos_check_requires_tokenizer_eos_id():
     tokenizer.eos_token_id = None
     with pytest.raises(ValueError, match="tokenizer.eos_token_id"):
         reward_module.MultiThreadNaiveRewardManager(tokenizer, num_examine=0, check_eos=True)
+
+
+def test_zero_item_timeout_does_not_install_or_clear_an_alarm(monkeypatch):
+    scorer = reward_module.MathVerifyScorer()
+    scorer._verify_func = lambda gold, prediction: (1.0, None)
+    signal_calls = []
+    monkeypatch.setattr(reward_module.signal, "signal", lambda *args: signal_calls.append(args))
+    monkeypatch.setattr(reward_module.signal, "alarm", lambda seconds: signal_calls.append(seconds))
+    assert scorer.compute_score(r"\boxed{1}", "1", timeout_score=0, per_item_timeout_s=0) == 1
+    assert signal_calls == []
+
+
+def test_enabled_item_timeout_still_returns_timeout_score_and_clears_alarm(monkeypatch):
+    scorer = reward_module.MathVerifyScorer()
+
+    def time_out(*args):
+        raise reward_module._ItemTimeout
+
+    scorer._verify_func = time_out
+    alarms = []
+    monkeypatch.setattr(reward_module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(reward_module.signal, "alarm", alarms.append)
+    assert scorer.compute_score(r"\boxed{1}", "1", timeout_score=0, per_item_timeout_s=1) == 0
+    assert alarms == [1, 0]
+
+
+@pytest.mark.parametrize("batch_timeout, expected_score", [(0, 1), (10, 0)])
+def test_batch_deadline_can_be_disabled_for_slow_results(score_batches, monkeypatch, batch_timeout, expected_score):
+    manager = reward_module.MultiThreadNaiveRewardManager(
+        Tokenizer(), num_examine=0, num_reward_actors=1, check_eos=True,
+        per_item_timeout_s=0, per_batch_timeout_s=batch_timeout,
+    )
+    clock = iter([0, 3600, 7200])
+    monkeypatch.setattr(reward_module, "time", SimpleNamespace(time=lambda: next(clock)))
+    polls = []
+    cancelled = []
+
+    def wait(refs, **kwargs):
+        polls.append(True)
+        return ([], refs) if len(polls) == 1 else (refs, [])
+
+    monkeypatch.setattr(reward_module.ray, "wait", wait)
+    monkeypatch.setattr(reward_module.ray, "cancel", lambda ref, **kwargs: cancelled.append(ref))
+    result = manager(make_data([[CORRECT, EOS]]), return_dict=True)
+    assert result["reward_tensor"].sum().item() == expected_score
+    assert len(cancelled) == (0 if batch_timeout == 0 else 1)
+
+
+def test_grader_still_receives_only_response_text_without_outer_timeouts(score_batches, monkeypatch):
+    data = make_data([[CORRECT, EOS]])
+    data.batch["prompts"][0] = torch.tensor([WRONG, SPACE])
+    predictions = []
+    original = reward_module.MathVerifyScorer.compute_score
+
+    def capture(self, model_output, ground_truth, timeout_score, per_item_timeout_s):
+        predictions.append(model_output)
+        assert per_item_timeout_s == 0
+        return original(self, model_output, ground_truth, timeout_score, per_item_timeout_s)
+
+    monkeypatch.setattr(reward_module.MathVerifyScorer, "compute_score", capture)
+    manager = reward_module.MultiThreadNaiveRewardManager(
+        Tokenizer(), num_examine=0, num_reward_actors=1, check_eos=True,
+        per_item_timeout_s=0, per_batch_timeout_s=0,
+    )
+    assert manager(data).sum().item() == 1
+    assert predictions == [r"\boxed{1}"]

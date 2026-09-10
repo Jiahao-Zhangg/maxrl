@@ -64,9 +64,11 @@ class MathVerifyScorer:
         # math_metric expects boxed GT
         gt_boxed = f"\\boxed{{{ground_truth_unboxed}}}"
 
-        # hard per-item timeout
-        signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(per_item_timeout_s)
+        # Zero disables our outer deadline, matching the ER verifier wrapper.
+        # MathVerify keeps its own internal parsing/equivalence timeouts.
+        if per_item_timeout_s > 0:
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(per_item_timeout_s)
         try:
             score, _ = self._verify_func([gt_boxed], [model_output])
             return float(score)
@@ -77,7 +79,8 @@ class MathVerifyScorer:
         except Exception:
             return 0.0
         finally:
-            signal.alarm(0)
+            if per_item_timeout_s > 0:
+                signal.alarm(0)
 
 
 # =============================================================================
@@ -198,6 +201,8 @@ class MultiThreadNaiveRewardManager:
         self._timeout_score = float(timeout_score)
         self._per_item_timeout_s = int(per_item_timeout_s)
         self._per_batch_timeout_s = float(per_batch_timeout_s)
+        if self._per_item_timeout_s < 0 or self._per_batch_timeout_s < 0:
+            raise ValueError("Reward timeouts must be nonnegative; use 0 to disable the outer deadlines")
         self._poll_interval_s = float(poll_interval_s)
         if isinstance(zero_reward_on_max_response_length, str):
             zero_reward_on_max_response_length = zero_reward_on_max_response_length.lower() in ("1", "true", "yes", "y")
@@ -492,7 +497,7 @@ class MultiThreadNaiveRewardManager:
 
             # batch-level safety timeout (should be rare now)
             for ref in list(pending):
-                if now - start_time.get(ref, now) > self._per_batch_timeout_s:
+                if self._per_batch_timeout_s > 0 and now - start_time.get(ref, now) > self._per_batch_timeout_s:
                     pending.remove(ref)
                     batch = ref_to_batch.pop(ref)
                     start_time.pop(ref, None)

@@ -441,6 +441,10 @@ actor_rollout_ref:
     # Whether to ignore EOS and continue generating after EOS is hit.
     ignore_eos: False
 
+    # Synchronous vLLM: overwrite the final generated token with EOS, even at
+    # the response cap. Requires calculate_log_probs=False (actor recomputes).
+    force_eos: False
+
     # Whether to disable CUDA graph. Default True to allow cache freeing.
     enforce_eager: False
 
