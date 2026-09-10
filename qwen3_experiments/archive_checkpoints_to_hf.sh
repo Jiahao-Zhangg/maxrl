@@ -15,6 +15,10 @@ newest completed checkpoint whenever free disk space falls below that limit.
 
 Each global_step_N checkpoint is stored in a public Hub model repository named
 HF_REPO_PREFIX-step_N, with global_step_N preserved as the top-level folder.
+
+PYTHON_BIN selects the Python interpreter for Hub API calls. Launchers can set
+MAXRL_TRAINING_EXIT_STATUS_FILE and pass their own PID: an atomically written
+exit code ends monitoring, and only code 0 plus the final-step log marks success.
 EOF
 }
 
@@ -34,6 +38,8 @@ POLL_SECONDS=${MAXRL_ARCHIVE_POLL_SECONDS:-60}
 UPLOAD_WORKERS=${MAXRL_HF_UPLOAD_WORKERS:-4}
 UPLOAD_LOCK=${MAXRL_HF_UPLOAD_LOCK:-${REPO_ROOT}/outputs/.hf_checkpoint_upload.lock}
 MIN_FREE_GIB=${MAXRL_ARCHIVE_MIN_FREE_GIB:-0}
+PYTHON_BIN=${PYTHON_BIN:-python}
+TRAINING_EXIT_STATUS_FILE=${MAXRL_TRAINING_EXIT_STATUS_FILE:-}
 
 if [[ ! "${TRAINING_PID}" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: TRAINING_PID must be a positive integer" >&2
@@ -72,7 +78,7 @@ command -v flock >/dev/null 2>&1 || {
     echo "error: flock is required" >&2
     exit 1
 }
-python -c 'import huggingface_hub' >/dev/null 2>&1 || {
+"${PYTHON_BIN}" -c 'import huggingface_hub' >/dev/null 2>&1 || {
     echo "error: huggingface_hub is required by the active Python" >&2
     exit 1
 }
@@ -85,11 +91,18 @@ log() {
 
 training_is_running() {
     local state
+    if [[ -n "${TRAINING_EXIT_STATUS_FILE}" && -s "${TRAINING_EXIT_STATUS_FILE}" ]]; then
+        return 1
+    fi
     state=$(ps -o stat= -p "${TRAINING_PID}" 2>/dev/null) || return 1
     [[ "${state//[[:space:]]/}" != Z* ]]
 }
 
 training_succeeded() {
+    if [[ -n "${TRAINING_EXIT_STATUS_FILE}" ]]; then
+        [[ -f "${TRAINING_EXIT_STATUS_FILE}" ]] || return 1
+        [[ "$(<"${TRAINING_EXIT_STATUS_FILE}")" == "0" ]] || return 1
+    fi
     [[ -f "${TRAINING_LOG}" ]] || return 1
     grep -aEq \
         "step:${FINAL_STEP}([[:space:]-]|$)|training/global_step:${FINAL_STEP}\\.000|${FINAL_STEP}/${FINAL_STEP}" \
@@ -134,7 +147,7 @@ checkpoint_is_complete() {
 
 make_repo_public() {
     local repo_id=$1
-    python - "${repo_id}" <<'PY'
+    "${PYTHON_BIN}" - "${repo_id}" <<'PY'
 import sys
 
 from huggingface_hub import HfApi
@@ -151,7 +164,7 @@ PY
 verify_upload() {
     local checkpoint=$1
     local repo_id=$2
-    python - "${checkpoint}" "${repo_id}" <<'PY'
+    "${PYTHON_BIN}" - "${checkpoint}" "${repo_id}" <<'PY'
 import sys
 import time
 from pathlib import Path
@@ -289,6 +302,12 @@ archive_checkpoint() {
 
 log "Monitoring ${EXPERIMENT_DIR} for training PID ${TRAINING_PID}"
 while true; do
+    # Check completion before listing: once stopped, include the final save
+    # even if it appeared during the previous monitoring iteration.
+    training_active=0
+    if training_is_running; then
+        training_active=1
+    fi
     mapfile -t all_checkpoints < <(list_checkpoints | sort -V)
     checkpoints=()
     for checkpoint in "${all_checkpoints[@]}"; do
@@ -297,7 +316,7 @@ while true; do
         fi
     done
 
-    if training_is_running; then
+    if (( training_active )); then
         retained_checkpoint_count=1
         if disk_space_is_low; then
             retained_checkpoint_count=0
@@ -343,6 +362,6 @@ while true; do
             fi
         done
     fi
-    log "Training stopped before step ${FINAL_STEP}; retaining the newest checkpoint for recovery"
+    log "Training did not finish successfully at step ${FINAL_STEP}; retaining the newest checkpoint for recovery"
     exit 1
 done

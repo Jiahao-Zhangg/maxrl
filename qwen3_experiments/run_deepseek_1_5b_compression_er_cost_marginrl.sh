@@ -15,7 +15,9 @@
 # Launch in the existing maxrl environment on four GPUs:
 #   GPU_IDS=0,1,2,3 bash qwen3_experiments/run_deepseek_1_5b_compression_er_cost_marginrl.sh
 # Use PYTHON_BIN to select an existing interpreter instead of activating Conda.
-# Checkpoints stay under OUTPUT_ROOT/RUN_NAME/checkpoints; RESUME=1 resumes them.
+# Checkpoints are archived to public HF repos ${HF_REPO_PREFIX}-step_<N>.
+# HF_REPO_PREFIX defaults to zjhhhh/${RUN_NAME}; ARCHIVE_CHECKPOINTS=0 keeps them local.
+# RESUME=1 requires a local checkpoint (restore an archived checkpoint first).
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -41,6 +43,12 @@ RUN_NAME=${RUN_NAME:-er_cost_marginrl_r1_distill_1.5b_compression_n16_b512_32k_l
 OUTPUT_ROOT=${OUTPUT_ROOT:-${REPO_ROOT}/outputs}
 RUN_DIR=${OUTPUT_ROOT}/${RUN_NAME}
 CKPT_PATH=${RUN_DIR}/checkpoints
+TRAINING_LOG=${RUN_DIR}/logs/training.log
+ARCHIVE_LOG=${RUN_DIR}/logs/checkpoint_archiver.log
+TRAINING_EXIT_STATUS_FILE=${RUN_DIR}/logs/training.exit_status
+ARCHIVE_CHECKPOINTS=${ARCHIVE_CHECKPOINTS:-1}
+HF_REPO_PREFIX=${HF_REPO_PREFIX:-zjhhhh/${RUN_NAME}}
+ARCHIVER=${SCRIPT_DIR}/archive_checkpoints_to_hf.sh
 DATA_DIR=${DATA_DIR:-${REPO_ROOT}/data/compression_dataset}
 TRAIN_DATA=${DATA_DIR}/train.parquet
 DRY_RUN=${DRY_RUN:-0}
@@ -51,12 +59,16 @@ WANDB_PROJECT=${WANDB_PROJECT:-maxrl_compression}
 VERIFIER_WORKERS=${VERIFIER_WORKERS:-16}
 RAY_TMPDIR=${RAY_TMPDIR:-/tmp/maxrl_er_cost_${UID}}
 
-for option in DRY_RUN PREPARE_ONLY RESUME USE_WANDB; do
+for option in DRY_RUN PREPARE_ONLY RESUME USE_WANDB ARCHIVE_CHECKPOINTS; do
     [[ "${!option}" == "0" || "${!option}" == "1" ]] || {
         echo "${option} must be 0 or 1." >&2
         exit 2
     }
 done
+if [[ "${ARCHIVE_CHECKPOINTS}" == "1" && ! "${HF_REPO_PREFIX}" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "HF_REPO_PREFIX must have the form owner/name." >&2
+    exit 2
+fi
 [[ "${GPU_IDS}" =~ ^[0-9]+,[0-9]+,[0-9]+,[0-9]+$ ]] || {
     echo "GPU_IDS must list four distinct GPU IDs, for example 0,1,2,3." >&2
     exit 2
@@ -177,6 +189,12 @@ echo "Prompt cap: ${MAX_PROMPT_LENGTH}; output cap: ${MAX_RESPONSE_LENGTH}; cont
 echo "LR: 1e-6; warmup: 3 steps; KL: 0; checkpoints at steps 20, 40, 60, 80, 100."
 echo "Reward completion check: responses must contain EOS; missing EOS receives zero reward."
 echo "Checkpoints: ${CKPT_PATH}"
+if [[ "${ARCHIVE_CHECKPOINTS}" == "1" ]]; then
+    echo "HF archive: ${HF_REPO_PREFIX}-step_<N> (public FSDP checkpoints); log: ${ARCHIVE_LOG}"
+    echo "Upload and verify before local cleanup; keep the newest checkpoint until training succeeds."
+else
+    echo "HF archive disabled; checkpoints stay local."
+fi
 if [[ "${DRY_RUN}" == "1" ]]; then
     printf 'Prepare command:\n'
     printf '  %q' "${PREPARE_CMD[@]}"
@@ -194,6 +212,15 @@ if [[ "${PREPARE_ONLY}" != "1" ]]; then
     if [[ "${RESUME}" == "1" && ! -s "${CKPT_PATH}/latest_checkpointed_iteration.txt" ]]; then
         echo "No local checkpoint to resume under ${CKPT_PATH}." >&2
         exit 1
+    fi
+    if [[ "${RESUME}" == "1" ]]; then
+        latest_step=$(tr -d '[:space:]' <"${CKPT_PATH}/latest_checkpointed_iteration.txt")
+        if [[ ! "${latest_step}" =~ ^[0-9]+$ ||
+              ! -s "${CKPT_PATH}/global_step_${latest_step}/data.pt" ||
+              ! -d "${CKPT_PATH}/global_step_${latest_step}/actor" ]]; then
+            echo "Latest checkpoint is not local; restore global_step_${latest_step} from HF before RESUME=1." >&2
+            exit 1
+        fi
     fi
 fi
 
@@ -213,6 +240,27 @@ export RAY_ADDRESS=local
 export RAY_TMPDIR
 export SEED=42
 unset TRANSFORMERS_CACHE
+
+if [[ "${PREPARE_ONLY}" != "1" ]]; then
+    command -v setsid >/dev/null
+    if [[ "${ARCHIVE_CHECKPOINTS}" == "1" ]]; then
+        [[ -f "${ARCHIVER}" ]]
+        command -v flock >/dev/null
+        if ! command -v hf >/dev/null && ! command -v huggingface-cli >/dev/null; then
+            echo "Install the Hugging Face CLI, or set ARCHIVE_CHECKPOINTS=0." >&2
+            exit 1
+        fi
+        "${PYTHON_BIN}" - "${HF_REPO_PREFIX}" <<'PY'
+import sys
+
+from huggingface_hub import HfApi
+from huggingface_hub.utils import validate_repo_id
+
+validate_repo_id(f"{sys.argv[1]}-step_100")
+print("HF upload account:", HfApi().whoami()["name"])
+PY
+    fi
+fi
 
 "${PREPARE_CMD[@]}"
 if [[ "${PREPARE_ONLY}" == "1" ]]; then
@@ -241,4 +289,51 @@ for gpu_id in "${selected_gpus[@]}"; do
 done
 
 mkdir -p "${RUN_DIR}/logs" "${CKPT_PATH}" "${RAY_TMPDIR}"
-"${TRAIN_CMD[@]}" 2>&1 | tee -a "${RUN_DIR}/logs/training.log"
+rm -f -- "${TRAINING_EXIT_STATUS_FILE}"
+TRAIN_PID=""
+ARCHIVE_PID=""
+cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+    for pid in "${TRAIN_PID}" "${ARCHIVE_PID}"; do
+        if [[ -n "${pid}" ]]; then
+            kill -TERM -- "-${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
+        fi
+    done
+    exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Wait for both Python and tee so the archiver sees the complete training log.
+setsid bash -o pipefail -c 'log=$1; shift; "$@" 2>&1 | tee -a "$log"' \
+    _ "${TRAINING_LOG}" "${TRAIN_CMD[@]}" &
+TRAIN_PID=$!
+if [[ "${ARCHIVE_CHECKPOINTS}" == "1" ]]; then
+    # Monitor this launcher until it publishes the actual training exit code.
+    # This also retains the latest checkpoint if the launcher itself is killed.
+    PYTHON_BIN="${PYTHON_BIN}" MAXRL_TRAINING_EXIT_STATUS_FILE="${TRAINING_EXIT_STATUS_FILE}" \
+        MAXRL_HF_UPLOAD_LOCK="${MAXRL_HF_UPLOAD_LOCK:-${OUTPUT_ROOT}/.hf_checkpoint_upload.lock}" \
+        setsid bash "${ARCHIVER}" "${CKPT_PATH}" "${HF_REPO_PREFIX}" "$$" "${TRAINING_LOG}" 100 \
+        >>"${ARCHIVE_LOG}" 2>&1 &
+    ARCHIVE_PID=$!
+    echo "HF checkpoint watcher PID: ${ARCHIVE_PID}; log: ${ARCHIVE_LOG}"
+fi
+training_status=0
+wait "${TRAIN_PID}" || training_status=$?
+TRAIN_PID=""
+printf '%s\n' "${training_status}" >"${TRAINING_EXIT_STATUS_FILE}.tmp"
+mv -- "${TRAINING_EXIT_STATUS_FILE}.tmp" "${TRAINING_EXIT_STATUS_FILE}"
+archive_status=0
+if [[ -n "${ARCHIVE_PID}" ]]; then
+    echo "Training exited with status ${training_status}; waiting for HF checkpoint archival."
+    wait "${ARCHIVE_PID}" || archive_status=$?
+    ARCHIVE_PID=""
+    echo "HF checkpoint archiver exited with status ${archive_status}; log: ${ARCHIVE_LOG}"
+fi
+if (( training_status != 0 )); then
+    exit "${training_status}"
+fi
+exit "${archive_status}"
