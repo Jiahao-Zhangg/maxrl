@@ -14,6 +14,8 @@
 # Use PYTHON_BIN to select an existing interpreter instead of activating Conda.
 # Checkpoints are archived to public HF repos ${HF_REPO_PREFIX}-step_<N>.
 # HF_REPO_PREFIX defaults to zjhhhh/${RUN_NAME}; ARCHIVE_CHECKPOINTS=0 keeps them local.
+# Every training rollout is saved locally and uploaded as an HF dataset at the end.
+# Set MAXRL_SAVE_ROLLOUT_DATASET=0 to disable rollout saving and its dataset upload.
 # RESUME=1 requires a local checkpoint (restore an archived checkpoint first).
 set -euo pipefail
 
@@ -50,6 +52,9 @@ TRAINING_EXIT_STATUS_FILE=${RUN_DIR}/logs/training.exit_status
 ARCHIVE_CHECKPOINTS=${ARCHIVE_CHECKPOINTS:-1}
 HF_REPO_PREFIX=${HF_REPO_PREFIX:-zjhhhh/${RUN_NAME}}
 ARCHIVER=${SCRIPT_DIR}/archive_checkpoints_to_hf.sh
+SAVE_ROLLOUT_DATASET=${MAXRL_SAVE_ROLLOUT_DATASET:-1}
+ROLLOUT_DATASET_DIR=${MAXRL_ROLLOUT_DATASET_DIR:-${RUN_DIR}/rollout_dataset}
+ROLLOUT_DATASET_HF_REPO=${MAXRL_ROLLOUT_DATASET_HF_REPO:-${HF_REPO_PREFIX}-rollouts}
 DATA_DIR=${DATA_DIR:-${REPO_ROOT}/data/compression_dataset}
 TRAIN_DATA=${DATA_DIR}/train.parquet
 DRY_RUN=${DRY_RUN:-0}
@@ -66,6 +71,18 @@ for option in DRY_RUN PREPARE_ONLY RESUME USE_WANDB ARCHIVE_CHECKPOINTS; do
         exit 2
     }
 done
+case "${SAVE_ROLLOUT_DATASET,,}" in
+    1|true|yes) SAVE_ROLLOUT_DATASET=true ;;
+    0|false|no) SAVE_ROLLOUT_DATASET=false ;;
+    *)
+        echo "MAXRL_SAVE_ROLLOUT_DATASET must be 0/1, false/true, or no/yes." >&2
+        exit 2
+        ;;
+esac
+if [[ "${SAVE_ROLLOUT_DATASET}" == "true" && ! "${ROLLOUT_DATASET_HF_REPO}" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "MAXRL_ROLLOUT_DATASET_HF_REPO must have the form owner/name." >&2
+    exit 2
+fi
 if [[ "${ARCHIVE_CHECKPOINTS}" == "1" && ! "${HF_REPO_PREFIX}" =~ ^[^/]+/[^/]+$ ]]; then
     echo "HF_REPO_PREFIX must have the form owner/name." >&2
     exit 2
@@ -169,8 +186,17 @@ TRAIN_CMD=(
     "trainer.project_name='${WANDB_PROJECT}'"
     "trainer.experiment_name='${RUN_NAME}'"
     "trainer.default_local_dir='${CKPT_PATH}'"
+    "trainer.rollout_dataset.enabled=${SAVE_ROLLOUT_DATASET}"
     "ray_init.ray_dir='${RAY_TMPDIR}'"
 )
+if [[ "${SAVE_ROLLOUT_DATASET}" == "true" ]]; then
+    TRAIN_CMD+=(
+        "trainer.rollout_dataset.local_dir='${ROLLOUT_DATASET_DIR}'"
+        "trainer.rollout_dataset.hub_repo_id='${ROLLOUT_DATASET_HF_REPO}'"
+        trainer.rollout_dataset.private=false
+        trainer.rollout_dataset.upload_num_workers=4
+    )
+fi
 if [[ "${USE_WANDB}" == "1" ]]; then
     TRAIN_CMD+=("trainer.logger=['console','wandb']")
 else
@@ -189,6 +215,12 @@ echo "Prompt cap: ${MAX_PROMPT_LENGTH}; output cap: ${MAX_RESPONSE_LENGTH}; cont
 echo "LR: 1e-6; warmup: 3 steps; KL: 0; checkpoints at steps 20, 40, 60, 80, 100."
 echo "Reward completion check: responses must contain EOS; missing EOS receives zero reward."
 echo "Checkpoints: ${CKPT_PATH}"
+if [[ "${SAVE_ROLLOUT_DATASET}" == "true" ]]; then
+    echo "Training rollouts: all 512 responses/step saved under ${ROLLOUT_DATASET_DIR}/data/."
+    echo "Rollout HF dataset after training: ${ROLLOUT_DATASET_HF_REPO} (public; local copy retained)."
+else
+    echo "Training rollout saving and dataset upload disabled."
+fi
 if [[ "${ARCHIVE_CHECKPOINTS}" == "1" ]]; then
     echo "HF archive: ${HF_REPO_PREFIX}-step_<N> (public FSDP checkpoints); log: ${ARCHIVE_LOG}"
     echo "Upload and verify before local cleanup; keep the newest checkpoint until training succeeds."
@@ -243,6 +275,7 @@ unset TRANSFORMERS_CACHE
 
 if [[ "${PREPARE_ONLY}" != "1" ]]; then
     command -v setsid >/dev/null
+    HF_REPO_IDS=()
     if [[ "${ARCHIVE_CHECKPOINTS}" == "1" ]]; then
         [[ -f "${ARCHIVER}" ]]
         command -v flock >/dev/null
@@ -250,13 +283,20 @@ if [[ "${PREPARE_ONLY}" != "1" ]]; then
             echo "Install the Hugging Face CLI, or set ARCHIVE_CHECKPOINTS=0." >&2
             exit 1
         fi
-        "${PYTHON_BIN}" - "${HF_REPO_PREFIX}" <<'PY'
+        HF_REPO_IDS+=("${HF_REPO_PREFIX}-step_100")
+    fi
+    if [[ "${SAVE_ROLLOUT_DATASET}" == "true" ]]; then
+        HF_REPO_IDS+=("${ROLLOUT_DATASET_HF_REPO}")
+    fi
+    if (( ${#HF_REPO_IDS[@]} > 0 )); then
+        "${PYTHON_BIN}" - "${HF_REPO_IDS[@]}" <<'PY'
 import sys
 
 from huggingface_hub import HfApi
 from huggingface_hub.utils import validate_repo_id
 
-validate_repo_id(f"{sys.argv[1]}-step_100")
+for repo_id in sys.argv[1:]:
+    validate_repo_id(repo_id)
 print("HF upload account:", HfApi().whoami()["name"])
 PY
     fi

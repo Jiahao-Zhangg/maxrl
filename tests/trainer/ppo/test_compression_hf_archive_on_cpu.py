@@ -137,7 +137,10 @@ def launch(tmp_path, request):
         "TEST_TRAIN_STARTED": str(tmp_path / "train_started"),
     })
     # Exercise the defaults, independently of the developer's shell exports.
-    for key in ("ARCHIVE_CHECKPOINTS", "HF_REPO_PREFIX", "MAXRL_TRAINING_EXIT_STATUS_FILE"):
+    for key in (
+        "ARCHIVE_CHECKPOINTS", "HF_REPO_PREFIX", "MAXRL_TRAINING_EXIT_STATUS_FILE",
+        "MAXRL_SAVE_ROLLOUT_DATASET", "MAXRL_ROLLOUT_DATASET_DIR", "MAXRL_ROLLOUT_DATASET_HF_REPO",
+    ):
         env.pop(key, None)
 
     def run(**overrides):
@@ -208,9 +211,9 @@ def test_verification_failure_retains_uploaded_checkpoint(launch):
     assert "Verification failed" in log
 
 
-def test_archive_can_be_disabled(launch):
+def test_all_hf_uploads_can_be_disabled(launch):
     run, root = launch
-    result = run(ARCHIVE_CHECKPOINTS="0", TEST_AUTH_FAIL="1")
+    result = run(ARCHIVE_CHECKPOINTS="0", MAXRL_SAVE_ROLLOUT_DATASET="0", TEST_AUTH_FAIL="1")
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (root / "auth_checked").exists()
     assert not (root / "remote").exists()
@@ -228,9 +231,10 @@ def test_preview_and_preparation_do_not_require_hf_login(launch, mode):
     assert not (root / "outputs").exists()
 
 
-def test_missing_hf_credentials_fails_before_training(launch):
+@pytest.mark.parametrize("archive_checkpoints", ["0", "1"])
+def test_missing_hf_credentials_fails_before_training(launch, archive_checkpoints):
     run, root = launch
-    result = run(TEST_AUTH_FAIL="1")
+    result = run(TEST_AUTH_FAIL="1", ARCHIVE_CHECKPOINTS=archive_checkpoints)
     assert result.returncode != 0
     assert "missing HF credentials" in result.stderr
     assert not (root / "train_started").exists()
