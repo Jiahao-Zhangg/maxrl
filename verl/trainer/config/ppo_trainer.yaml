@@ -877,6 +877,12 @@ algorithm:
   # Reference length for normalized cost estimators; normally max_response_length / 2
   cost_reference_tokens: null
 
+  # Additive L_0 in response-token units for fixed-N offset costs: c_i = L_i + L_0
+  cost_offset_tokens: 256.0
+
+  # Require complete cross-context batches before computing global f_cov statistics.
+  f_cov_num_prompts: 256
+
   # Maximum inverse cost; for fixed-N capped costs this implies minimum cost 1 / cap
   max_inverse_cost: 4.0
 

@@ -128,6 +128,8 @@ class AdvantageEstimator(str, Enum):
     RB_COST_AWARE_MAXRL = "rb_cost_aware_maxrl"
     FIXED_N_RB_COST_AWARE_MARGINRL = "fixed_n_rb_cost_aware_marginrl"
     FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED = "fixed_n_rb_cost_aware_marginrl_success_gated"
+    FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL = "fixed_n_rb_offset_cost_aware_marginrl"
+    F_COV = "f_cov"
     FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL = "fixed_n_rb_capped_cost_aware_marginrl"
     FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL = (
         "fixed_n_rb_capped_thinking_cost_aware_marginrl"
@@ -687,6 +689,25 @@ def compute_rb_cost_aware_maxrl_outcome_advantage(
     return advantages, advantages
 
 
+def compute_fixed_n_rb_offset_marginrl_costs(
+    response_mask: torch.Tensor,
+    cost_offset_tokens: float = 256.0,
+):
+    """Compute fixed-N trajectory costs as response length plus a token offset."""
+    if response_mask.ndim != 2:
+        raise ValueError(f"response_mask must be rank 2, got shape {tuple(response_mask.shape)}")
+
+    cost_offset_tokens = float(cost_offset_tokens)
+    if not math.isfinite(cost_offset_tokens) or cost_offset_tokens < 0:
+        raise ValueError(f"cost_offset_tokens must be finite and nonnegative, got {cost_offset_tokens}")
+
+    trajectory_lengths = response_mask.sum(dim=-1).detach().to(dtype=torch.float32)
+    if not torch.isfinite(trajectory_lengths).all().item() or torch.any(trajectory_lengths <= 0).item():
+        raise ValueError("fixed-N trajectory lengths must be finite and strictly positive")
+
+    return trajectory_lengths, trajectory_lengths + cost_offset_tokens
+
+
 def compute_fixed_n_rb_capped_marginrl_costs(
     response_mask: torch.Tensor,
     cost_reference_tokens: float,
@@ -1034,6 +1055,139 @@ def compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
 
     if return_diagnostics:
         return advantages, advantages, diagnostics
+    return advantages, advantages
+
+
+@register_adv_est(AdvantageEstimator.FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL)
+def compute_fixed_n_rb_offset_cost_aware_marginrl_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    config=None,
+    cost_offset_tokens: float = 256.0,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute fixed-N RB MarginRL with ``c_i = L_i + L_0``.
+
+    Use all N rollouts in the same-group estimate ``q_hat = M / sum_i c_i``.
+    After the existing N-fold scaling, successful trajectories receive
+    ``1 / p_hat - (L_i + L_0) / (mean_L + L_0)`` and failures receive
+    ``-M / (M + 1) * (L_i + L_0) / (mean_L + L_0)``, where ``p_hat = M / N``.
+    All-failure groups receive zero advantage. Costs use the full response
+    length even when a separate response_mask selects tokens for the loss.
+    """
+    if config is not None:
+        cost_offset_tokens = config.get("cost_offset_tokens", cost_offset_tokens)
+
+    cost_mask = response_mask if trajectory_cost_mask is None else trajectory_cost_mask
+    if cost_mask.shape != response_mask.shape:
+        raise ValueError(
+            "trajectory_cost_mask and response_mask must have matching shapes, "
+            f"got {tuple(cost_mask.shape)} and {tuple(response_mask.shape)}"
+        )
+    trajectory_lengths, trajectory_costs = compute_fixed_n_rb_offset_marginrl_costs(
+        response_mask=cost_mask,
+        cost_offset_tokens=cost_offset_tokens,
+    )
+    return compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        trajectory_costs=trajectory_costs,
+        trajectory_lengths=trajectory_lengths,
+        expected_group_size=expected_group_size,
+        return_diagnostics=return_diagnostics,
+        **kwargs,
+    )
+
+
+@register_adv_est(AdvantageEstimator.F_COV)
+@torch.no_grad()
+def compute_cross_context_f_cov_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    trajectory_cost_mask: Optional[torch.Tensor] = None,
+    expected_group_size: Optional[int] = None,
+    expected_num_prompts: Optional[int] = None,
+    config=None,
+    cost_offset_tokens: float = 256.0,
+    return_diagnostics: bool = False,
+    **kwargs,
+):
+    """Compute final cross-context plug-in advantages on the full rollout batch.
+
+    For K prompts with N responses each, let M_k count correct responses,
+    c_ki = L_ki + L_0, C = mean(c_ki), and H = mean_k(M_k / (M_k + 1)).
+    Correct responses receive N / M_k - c_ki / C * (H + 1 / (K * (M_k + 1)));
+    incorrect responses receive -c_ki / C * H, including all-failure groups.
+    These are already optimizer advantages: do not multiply by N or K again,
+    whiten them, or recompute their global statistics inside GPU microbatches.
+    Costs use the full response mask even when the loss selects fewer tokens.
+    """
+    if response_mask.ndim != 2 or token_level_rewards.shape != response_mask.shape:
+        raise ValueError("f_cov rewards and response mask must have matching rank-2 shapes")
+    if index is None or len(index) != response_mask.shape[0]:
+        raise ValueError("f_cov requires one prompt UID per response")
+    if config is not None:
+        cost_offset_tokens = config.get("cost_offset_tokens", cost_offset_tokens)
+        expected_num_prompts = config.get("f_cov_num_prompts", expected_num_prompts)
+    cost_mask = response_mask if trajectory_cost_mask is None else trajectory_cost_mask
+    if cost_mask.shape != response_mask.shape:
+        raise ValueError("f_cov cost and loss masks must have matching shapes")
+    lengths, costs = compute_fixed_n_rb_offset_marginrl_costs(cost_mask, cost_offset_tokens)
+    scores = token_level_rewards.sum(dim=-1).detach().to(device=costs.device, dtype=torch.float32)
+    is_zero = torch.isclose(scores, torch.zeros_like(scores), rtol=0.0, atol=1e-6)
+    is_one = torch.isclose(scores, torch.ones_like(scores), rtol=0.0, atol=1e-6)
+    if not torch.all(is_zero | is_one).item():
+        raise ValueError("f_cov requires binary trajectory rewards")
+    rewards = is_one.to(dtype=torch.float32)
+
+    groups = defaultdict(list)
+    for position, prompt_uid in enumerate(index):
+        groups[prompt_uid].append(position)
+    if not groups:
+        raise ValueError("f_cov requires at least one prompt group")
+    group_sizes = {len(positions) for positions in groups.values()}
+    if len(group_sizes) != 1:
+        raise ValueError("f_cov requires the same number of responses for every prompt")
+    group_size = next(iter(group_sizes))
+    num_prompts = len(groups)
+    if expected_group_size is not None and group_size != int(expected_group_size):
+        raise ValueError(f"f_cov expected {expected_group_size} responses per prompt, found {group_size}")
+    if expected_num_prompts is not None and num_prompts != int(expected_num_prompts):
+        raise ValueError(f"f_cov expected {expected_num_prompts} prompts in the full rollout batch, found {num_prompts}")
+
+    row_groups = torch.empty(len(index), dtype=torch.long, device=costs.device)
+    for group_id, positions in enumerate(groups.values()):
+        row_groups[positions] = group_id
+    success_counts = torch.zeros(num_prompts, dtype=torch.float32, device=costs.device)
+    success_counts.scatter_add_(0, row_groups, rewards)
+    global_cost_mean = costs.mean()
+    cross_context_h = (success_counts / (success_counts + 1.0)).mean()
+    success_correction = 1.0 / (num_prompts * (success_counts + 1.0))
+    row_success_counts = success_counts[row_groups]
+    cost_ratio = costs / global_cost_mean
+    trajectory_advantages = (
+        rewards * group_size / row_success_counts.clamp_min(1.0)
+        - cost_ratio * (cross_context_h + rewards * success_correction[row_groups])
+    )
+    advantages = trajectory_advantages.unsqueeze(-1) * response_mask
+    if return_diagnostics:
+        return advantages, advantages, {
+            "trajectory_lengths": lengths,
+            "trajectory_costs": costs,
+            "trajectory_rewards": rewards,
+            "optimizer_trajectory_advantages": trajectory_advantages,
+            "group_success_counts": success_counts,
+            "global_cost_mean": global_cost_mean,
+            "cross_context_h": cross_context_h,
+            "success_correction": success_correction,
+            "group_size": group_size,
+        }
     return advantages, advantages
 
 

@@ -204,6 +204,142 @@ incentive to become progressively shorter inside that range while retaining
 cost pressure above it. If $M=0$, then $\widehat q=0$ and the group update is
 zero.
 
+### Additive response-length cost ($L_0=256$)
+
+The `fixed_n_rb_offset_cost_aware_marginrl` variant uses $c_i=L_i+L_0$,
+with `algorithm.cost_offset_tokens=256`. Here $L_i$ counts the full response
+tokens, including EOS when generated, using the same response mask as the
+hard-clip Math12K run. It applies no cost clipping or reference-length normalization.
+For each prompt, use all $N$ rollouts to compute
+
+\[
+M=\sum_i r_i,\qquad \widehat p=M/N,\qquad
+\overline L=\frac1N\sum_i L_i,\qquad
+\widehat q=\frac{M}{\sum_i(L_i+L_0)}.
+\]
+
+After the existing multiplication of raw coefficients by $N$, the optimizer's
+trajectory advantages are
+
+\[
+A_i^{\rm offset\text{-}RB}=\begin{cases}
+\displaystyle \frac1{\widehat p}-\frac{L_i+L_0}{\overline L+L_0},&r_i=1,\\[2mm]
+\displaystyle -\frac{M}{M+1}\frac{L_i+L_0}{\overline L+L_0},&r_i=0.
+\end{cases}
+\]
+
+All-failure groups receive zero advantage. The token-mean loss reduction is
+unchanged. Unlike the hard floor $\max(L_i,256)$, additive cost continues to
+distinguish response lengths below 256 tokens. An offset of zero recovers the
+raw response-length estimator. Diagnostics use `fixed_n_rb_offset_marginrl/`;
+costs are reported in tokens plus offset, and `cap_ratio` is always zero.
+
+`qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_offset_marginrl.sh`
+reuses the hard-clip launcher's `run_qwen3_1_7b_math12k.sh` entry point. The
+defaults remain Qwen/Qwen3-1.7B-Base, hiyouga/math12k, 256 prompts × 16 responses
+per step, a 4,096-token output budget, token-mean loss, learning rate $10^{-6}$,
+zero KL, and seed 79. This launcher stops at step 150 with a five-epoch ceiling
+and saves/evaluates every 50 steps, producing checkpoints at steps 50, 100, and 150.
+The same prompt preprocessing, AIME25/Math500 validation, and `multi_thread`
+Math-Verify grader are retained, including the original 1-second item and
+10-second batch timeouts, no EOS reward gate, and no forced terminal EOS.
+Apart from the 150-step limit, automatic checkpoint uploads, and rollout archival, only the cost
+estimator and experiment/output names change relative to the
+hard-clip-256 configuration (`MAXRL_COST_REFERENCE_TOKENS=2048`,
+`MAXRL_MAX_INVERSE_COST=8`). The additive offset defaults to 256 tokens and can
+be set with `MAXRL_COST_OFFSET_TOKENS`.
+
+Checkpoint uploads are enabled by default with `MAXRL_UPLOAD_CHECKPOINTS=1`.
+The shared uploader publishes each completed checkpoint, including the newest
+one during training, to a public model repository under
+`zjhhhh/fixed-n-rb-offset-cost-aware-marginrl-qwen3-1.7b-base-math12k-offset256-token-mean-step_<N>`.
+These are the original FSDP checkpoints, including optimizer and data-loader
+state. Local checkpoint directories are deleted only after all remote file
+names and sizes have been verified. Failed uploads remain local for retry.
+The launcher waits for the final upload and records the actual training exit
+status; a failed run is not treated as completed solely because a final-step
+message appeared in its log. Upload logs are saved at
+`<checkpoint directory>/logs/checkpoint_upload.log`.
+
+Set `MAXRL_CHECKPOINT_HF_REPO_PREFIX` to change the upload destination, or
+`MAXRL_UPLOAD_CHECKPOINTS=0` to save checkpoints only locally. When uploads are enabled,
+configure the final step and checkpoint location via
+`MAXRL_TOTAL_TRAINING_STEPS`, `MAXRL_OUTPUT_DIR`, and `MAXRL_EXPERIMENT_NAME`
+so the trainer and uploader use the same settings. After uploaded checkpoints
+have been deleted locally, restore one before resuming it.
+
+Training rollouts are also saved by default (`MAXRL_SAVE_ROLLOUT_DATASET=1`),
+with all responses from each step in a compressed JSONL shard. The trainer
+uploads and verifies this dataset at training exit. Its public HF destination
+defaults to `${MAXRL_CHECKPOINT_HF_REPO_PREFIX}-rollouts`; override it with
+`MAXRL_ROLLOUT_DATASET_HF_REPO`. Rollout saving/uploading can be disabled
+independently with `MAXRL_SAVE_ROLLOUT_DATASET=0`.
+
+For an already-running trainer that writes legacy `<step>.jsonl` files through
+`trainer.rollout_data_dir`, `qwen3_experiments/upload_training_rollouts_to_hf.py`
+can attach without restarting training. It waits for the expected full row
+count, stages compressed shards, incrementally uploads and verifies them, and
+retains source files on both success and failure. Its state and lock live
+outside the staged dataset directory. Upload errors are retried, and a
+terminated trainer is distinguished from a reused process ID.
+
+The prepared launcher is:
+
+```bash
+bash qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_offset_marginrl.sh
+```
+
+### Cross-context plug-in advantage (`f_cov`)
+
+For a complete batch of $K$ distinct prompts with $N$ responses per prompt,
+define $M_k=\sum_i R_{k,i}$, $c_{k,i}=L_{k,i}+L_0$, and
+
+$$
+\bar c_{\mathrm{all}}=\frac{1}{KN}\sum_{k,i}c_{k,i},
+\qquad H=\frac{1}{K}\sum_k\frac{M_k}{M_k+1}.
+$$
+
+The final optimizer advantage is
+
+$$
+A_{k,i}^{f_{\mathrm{cov}}}=
+\begin{cases}
+\displaystyle\frac{N}{M_k}-\frac{c_{k,i}}{\bar c_{\mathrm{all}}}
+\left(H+\frac{1}{K(M_k+1)}\right), & R_{k,i}=1,\\[6pt]
+\displaystyle-\frac{c_{k,i}}{\bar c_{\mathrm{all}}}H, & R_{k,i}=0.
+\end{cases}
+$$
+
+All costs, counts, and advantages are detached. These coefficients already
+have the optimizer scaling: no additional multiplication by $N$ or $K$, or
+advantage whitening, is applied. Statistics are computed on the complete
+driver batch before the actor splits it into GPU microbatches. The standard
+PPO token-mean loss and optimizer settings are retained.
+
+The implementation uses `algorithm.adv_estimator=f_cov`,
+`algorithm.cost_offset_tokens=256`, and `algorithm.f_cov_num_prompts=256`.
+It rejects incomplete prompt batches and unequal response counts. Entirely
+failed prompts can receive negative advantages when another prompt succeeds;
+an entirely failed batch receives zero. For $K=1$ the formula reduces to the
+previous per-prompt additive-cost estimator. Metrics use the `f_cov/` prefix,
+including `H`, `global_cost_mean`, success counts, and final advantage scales.
+
+`qwen3_experiments/run_qwen3_1_7b_math12k_f_cov_offset_marginrl.sh` starts from
+Qwen/Qwen3-1.7B-Base on Math12K with the same grader, EOS behavior, 256 × 16
+rollouts, and training settings as the additive-cost baseline. It trains for
+150 steps, saves/evaluates every 50 steps, uploads and verifies checkpoints
+before deleting them locally, and saves every training rollout for HF dataset
+upload at the end of training.
+
+`python -m qwen3_experiments.queue_math12k_after_run --plan <plan.json>
+--state-file <state.json>` queues that launcher behind a specific predecessor
+PID and process start time. It requires successful predecessor training,
+verified checkpoint/rollout uploads, checkpoint cleanup, and two idle checks
+on the selected GPUs. It rechecks GPU availability after network checks and
+records a launch before spawning it to prevent duplicate launches. `--check`
+validates the plan without starting training; a `STOP` file beside the queue
+state cancels the pending launch.
+
 ## 5. Fixed-$N$ RB estimator with fixed $\widehat q=2$
 
 This ablation keeps the capped normalized cost from Section 4,
@@ -347,11 +483,13 @@ first batch position.
 | Fixed-$N$ RB | `fixed_n_rb_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_marginrl.sh` |
 | Fixed-$N$ RB, failures gated | `fixed_n_rb_cost_aware_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_marginrl_success_gated.sh` |
 | Fixed-$N$ RB, capped normalized cost | `fixed_n_rb_capped_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_marginrl.sh` |
+| Fixed-$N$ RB, additive $L+256$ cost | `fixed_n_rb_offset_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_offset_marginrl.sh` |
+| Cross-context plug-in, additive $L+256$ cost | `f_cov` | `qwen3_experiments/run_qwen3_1_7b_math12k_f_cov_offset_marginrl.sh` |
 | Fixed-$N$ RB, capped cost and fixed $\widehat q$ | `fixed_n_rb_capped_fixed_q_cost_aware_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_capped_fixed_q_marginrl.sh` |
 | Fixed-$N$ RB, Efficient-Reasoning cost | `fixed_n_rb_efficient_reasoning_cost_marginrl` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_marginrl.sh` |
 | Fixed-$N$ RB, Efficient-Reasoning cost, failures gated | `fixed_n_rb_efficient_reasoning_cost_marginrl_success_gated` | `qwen3_experiments/run_qwen3_1_7b_math12k_fixed_n_rb_er_cost_marginrl_success_gated.sh` |
 
-The fixed-$N$ launchers default to `token-mean`, five epochs, and Math12K,
+The Math12K fixed-$N$ launchers default to `token-mean`, five epochs, and Math12K,
 matching the loss reduction used by original MaxRL and capped inverse-cost
 MaxRL. They also include the aggregation mode in their default W&B run and
 checkpoint names. `seq-mean-token-sum` remains available through

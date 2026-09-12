@@ -500,6 +500,19 @@ elif [[ "${ADVANTAGE_ESTIMATOR}" == "rb_cost_aware_maxrl" ]]; then
     RB_COST_MAX_TOKENS=${MAXRL_RB_COST_MAX_TOKENS:-${MAX_RESPONSE_LENGTH}}
     ALGORITHM_OVERRIDES+=("algorithm.rb_cost_max_tokens=${RB_COST_MAX_TOKENS}")
     echo "RB cost-aware MaxRL: cost_max_tokens=${RB_COST_MAX_TOKENS}, zero-success update=zero"
+elif [[ "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_offset_cost_aware_marginrl" || "${ADVANTAGE_ESTIMATOR}" == "f_cov" ]]; then
+    if [[ "${LOSS_AGG_MODE}" != "token-mean" && "${LOSS_AGG_MODE}" != "seq-mean-token-sum" ]]; then
+        echo "error: ${ADVANTAGE_ESTIMATOR} supports token-mean or seq-mean-token-sum loss aggregation" >&2
+        exit 1
+    fi
+    COST_OFFSET_TOKENS=${MAXRL_COST_OFFSET_TOKENS:-256}
+    ALGORITHM_OVERRIDES+=("algorithm.cost_offset_tokens=${COST_OFFSET_TOKENS}")
+    if [[ "${ADVANTAGE_ESTIMATOR}" == "f_cov" ]]; then
+        ALGORITHM_OVERRIDES+=("algorithm.f_cov_num_prompts=${FULL_BATCH_SIZE}")
+        echo "Cross-context f_cov: K=${FULL_BATCH_SIZE}, N=${NUM_PER_PROMPT_ROLLOUTS}, cost=tokens+${COST_OFFSET_TOKENS}, global cost mean and H"
+    else
+        echo "Additive-cost fixed-N RB MarginRL: N=${NUM_PER_PROMPT_ROLLOUTS}, cost=tokens+${COST_OFFSET_TOKENS}, q_hat=M/sum(cost)"
+    fi
 elif [[
     "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_cost_aware_marginrl"
     || "${ADVANTAGE_ESTIMATOR}" == "fixed_n_rb_capped_thinking_cost_aware_marginrl"
@@ -582,67 +595,92 @@ if [[ -z "${WANDB_API_KEY:-}" ]]; then
     echo "Note: the original logger configuration uses Weights & Biases; ensure 'wandb login' has been run."
 fi
 
-python -W ignore -m verl.trainer.main_ppo \
-    algorithm.adv_estimator="${ADVANTAGE_ESTIMATOR}" \
-    data.train_files="${TRAIN_DATASET_PATH}" \
-    data.val_files="${TEST_DATASET_PATH}" \
-    data.train_batch_size="${FULL_BATCH_SIZE}" \
-    data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
-    data.max_response_length="${MAX_RESPONSE_LENGTH}" \
-    data.filter_overlong_prompts=True \
-    data.truncation=error \
-    actor_rollout_ref.model.path="${MODEL_PATH}" \
-    actor_rollout_ref.actor.optim.lr="${LEARNING_RATE}" \
-    actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PER_GPU_MINI_BATCH_SIZE}" \
-    actor_rollout_ref.actor.use_kl_loss=False \
-    actor_rollout_ref.actor.kl_loss_coef="${KL_COEFF}" \
-    actor_rollout_ref.actor.clip_ratio_low="${CLIP_RATIO_LOW}" \
-    actor_rollout_ref.actor.clip_ratio_high="${CLIP_RATIO_HIGH}" \
-    actor_rollout_ref.actor.grad_clip="${GRAD_CLIP}" \
-    actor_rollout_ref.actor.loss_agg_mode="${LOSS_AGG_MODE}" \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.actor.ppo_epochs="${PPO_EPOCHS}" \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${PER_GPU_MINI_BATCH_SIZE}" \
-    actor_rollout_ref.rollout.tensor_model_parallel_size="${TENSOR_MODEL_PARALLEL_SIZE}" \
-    actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
-    actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS}" \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
-    actor_rollout_ref.rollout.n="${NUM_PER_PROMPT_ROLLOUTS}" \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${PER_GPU_MINI_BATCH_SIZE}" \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
-    actor_rollout_ref.rollout.val_kwargs.n="${NUM_PER_PROMPT_ROLLOUTS_VALIDATION}" \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-    actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-    actor_rollout_ref.rollout.val_kwargs.top_k=-1 \
-    actor_rollout_ref.rollout.multi_turn.enable=False \
-    algorithm.use_kl_in_reward=False \
-    algorithm.kl_penalty=low_var_kl \
-    algorithm.kl_ctrl.kl_coef="${KL_COEFF}" \
-    "${ALGORITHM_OVERRIDES[@]}" \
-    reward_model.reward_manager="${REWARD_MANAGER}" \
-    trainer.balance_batch=True \
-    trainer.critic_warmup=0 \
-    trainer.val_before_train=True \
-    trainer.val_only=False \
-    trainer.val_on_last_step=True \
-    "trainer.logger=['console','wandb']" \
-    trainer.project_name="${PROJECT_NAME}" \
-    trainer.experiment_name="${EXPERIMENT_NAME}" \
-    trainer.default_local_dir="${CHECKPOINT_SAVE_PATH}" \
-    trainer.n_gpus_per_node=4 \
-    trainer.nnodes=1 \
-    trainer.save_freq="${SAVE_FREQ}" \
-    trainer.max_actor_ckpt_to_keep=400 \
-    trainer.max_critic_ckpt_to_keep=400 \
-    trainer.test_freq="${TEST_FREQ}" \
-    trainer.total_epochs="${TOTAL_EPOCHS}" \
-    "${TRAINER_OVERRIDES[@]}" \
-    ray_init.ray_dir="${MAXRL_RAY_DIR}" \
-    "${ROLLOUT_DATASET_OVERRIDES[@]}" \
+TRAIN_CMD=(
+    python -W ignore -m verl.trainer.main_ppo
+    algorithm.adv_estimator="${ADVANTAGE_ESTIMATOR}"
+    data.train_files="${TRAIN_DATASET_PATH}"
+    data.val_files="${TEST_DATASET_PATH}"
+    data.train_batch_size="${FULL_BATCH_SIZE}"
+    data.max_prompt_length="${MAX_PROMPT_LENGTH}"
+    data.max_response_length="${MAX_RESPONSE_LENGTH}"
+    data.filter_overlong_prompts=True
+    data.truncation=error
+    actor_rollout_ref.model.path="${MODEL_PATH}"
+    actor_rollout_ref.actor.optim.lr="${LEARNING_RATE}"
+    actor_rollout_ref.model.use_remove_padding=True
+    actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PER_GPU_MINI_BATCH_SIZE}"
+    actor_rollout_ref.actor.use_kl_loss=False
+    actor_rollout_ref.actor.kl_loss_coef="${KL_COEFF}"
+    actor_rollout_ref.actor.clip_ratio_low="${CLIP_RATIO_LOW}"
+    actor_rollout_ref.actor.clip_ratio_high="${CLIP_RATIO_HIGH}"
+    actor_rollout_ref.actor.grad_clip="${GRAD_CLIP}"
+    actor_rollout_ref.actor.loss_agg_mode="${LOSS_AGG_MODE}"
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.actor.fsdp_config.param_offload=False
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.actor.ppo_epochs="${PPO_EPOCHS}"
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${PER_GPU_MINI_BATCH_SIZE}"
+    actor_rollout_ref.rollout.tensor_model_parallel_size="${TENSOR_MODEL_PARALLEL_SIZE}"
+    actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
+    actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS}"
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7
+    actor_rollout_ref.rollout.n="${NUM_PER_PROMPT_ROLLOUTS}"
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${PER_GPU_MINI_BATCH_SIZE}"
+    actor_rollout_ref.ref.fsdp_config.param_offload=True
+    actor_rollout_ref.rollout.val_kwargs.n="${NUM_PER_PROMPT_ROLLOUTS_VALIDATION}"
+    actor_rollout_ref.rollout.val_kwargs.do_sample=True
+    actor_rollout_ref.rollout.val_kwargs.temperature=0.6
+    actor_rollout_ref.rollout.val_kwargs.top_p=0.95
+    actor_rollout_ref.rollout.val_kwargs.top_k=-1
+    actor_rollout_ref.rollout.multi_turn.enable=False
+    algorithm.use_kl_in_reward=False
+    algorithm.kl_penalty=low_var_kl
+    algorithm.kl_ctrl.kl_coef="${KL_COEFF}"
+    "${ALGORITHM_OVERRIDES[@]}"
+    reward_model.reward_manager="${REWARD_MANAGER}"
+    trainer.balance_batch=True
+    trainer.critic_warmup=0
+    trainer.val_before_train=True
+    trainer.val_only=False
+    trainer.val_on_last_step=True
+    "trainer.logger=['console','wandb']"
+    trainer.project_name="${PROJECT_NAME}"
+    trainer.experiment_name="${EXPERIMENT_NAME}"
+    trainer.default_local_dir="${CHECKPOINT_SAVE_PATH}"
+    trainer.n_gpus_per_node=4
+    trainer.nnodes=1
+    trainer.save_freq="${SAVE_FREQ}"
+    trainer.max_actor_ckpt_to_keep=400
+    trainer.max_critic_ckpt_to_keep=400
+    trainer.test_freq="${TEST_FREQ}"
+    trainer.total_epochs="${TOTAL_EPOCHS}"
+    "${TRAINER_OVERRIDES[@]}"
+    ray_init.ray_dir="${MAXRL_RAY_DIR}"
+    "${ROLLOUT_DATASET_OVERRIDES[@]}"
     "$@"
+)
+
+case "${MAXRL_UPLOAD_CHECKPOINTS:-0}" in
+    0) exec "${TRAIN_CMD[@]}" ;;
+    1) ;;
+    *) die "MAXRL_UPLOAD_CHECKPOINTS must be 0 or 1" ;;
+esac
+[[ -n "${TOTAL_TRAINING_STEPS}" ]] || die "Checkpoint uploads require MAXRL_TOTAL_TRAINING_STEPS"
+: "${MAXRL_CHECKPOINT_HF_REPO_PREFIX:?Set MAXRL_CHECKPOINT_HF_REPO_PREFIX for checkpoint uploads}"
+# Keep the trainer and uploader pointed at the same run and final step. These
+# settings remain configurable through their existing MAXRL environment vars.
+for override in "$@"; do
+    override_key=${override%%=*}
+    override_key=${override_key#++}
+    override_key=${override_key#+}
+    case "${override_key}" in
+        trainer.default_local_dir|trainer.total_training_steps)
+            die "With checkpoint uploads, use MAXRL_OUTPUT_DIR / MAXRL_EXPERIMENT_NAME / MAXRL_TOTAL_TRAINING_STEPS instead of ${override_key}"
+            ;;
+    esac
+done
+PYTHON_BIN="$(command -v python)" exec bash "${SCRIPT_DIR}/run_with_checkpoint_upload.sh" \
+    "${CHECKPOINT_SAVE_PATH}" "${MAXRL_CHECKPOINT_HF_REPO_PREFIX}" "${TOTAL_TRAINING_STEPS}" \
+    -- "${TRAIN_CMD[@]}"

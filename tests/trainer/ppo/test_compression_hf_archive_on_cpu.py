@@ -139,6 +139,7 @@ def launch(tmp_path, request):
     # Exercise the defaults, independently of the developer's shell exports.
     for key in (
         "ARCHIVE_CHECKPOINTS", "HF_REPO_PREFIX", "MAXRL_TRAINING_EXIT_STATUS_FILE",
+        "MAXRL_ARCHIVE_UPLOAD_LATEST",
         "MAXRL_SAVE_ROLLOUT_DATASET", "MAXRL_ROLLOUT_DATASET_DIR", "MAXRL_ROLLOUT_DATASET_HF_REPO",
     ):
         env.pop(key, None)

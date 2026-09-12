@@ -345,6 +345,43 @@ def compute_fixed_n_rb_cost_aware_marginrl_metrics(
     }
 
 
+def compute_cross_context_f_cov_metrics(
+    trajectory_lengths,
+    trajectory_costs,
+    trajectory_rewards,
+    optimizer_trajectory_advantages,
+    group_success_counts,
+    global_cost_mean,
+    cross_context_h,
+    success_correction,
+    group_size,
+) -> Dict[str, float]:
+    """Report the global coupling statistics and final optimizer weights."""
+    metrics = {
+        "f_cov/H": cross_context_h.item(),
+        "f_cov/global_cost_mean": global_cost_mean.item(),
+        "f_cov/num_prompts": float(group_success_counts.numel()),
+        "f_cov/responses_per_prompt": float(group_size),
+        "f_cov/accuracy": trajectory_rewards.mean().item(),
+        "f_cov/zero_success_group_ratio": (group_success_counts == 0).float().mean().item(),
+        "f_cov/success_correction_mean": success_correction.mean().item(),
+    }
+    for name, values in (
+        ("trajectory_tokens", trajectory_lengths),
+        ("cost", trajectory_costs),
+        ("M", group_success_counts),
+        ("optimizer_advantage", optimizer_trajectory_advantages),
+    ):
+        values = values.detach().float()
+        metrics.update({
+            f"f_cov/{name}_mean": values.mean().item(),
+            f"f_cov/{name}_std": values.std(unbiased=False).item(),
+            f"f_cov/{name}_min": values.min().item(),
+            f"f_cov/{name}_max": values.max().item(),
+        })
+    return metrics
+
+
 def compute_thinking_efficiency_reward_metrics(
     raw_math_accuracy,
     post_think_pre_box_tokens,

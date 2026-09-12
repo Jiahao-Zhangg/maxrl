@@ -45,6 +45,7 @@ from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_cost_aware_maxrl_metrics,
+    compute_cross_context_f_cov_metrics,
     compute_data_metrics,
     compute_fixed_n_rb_cost_aware_marginrl_metrics,
     compute_fixed_n_rb_efficient_reasoning_cost_marginrl_metrics,
@@ -336,9 +337,27 @@ def compute_advantage(
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
 
+    elif adv_estimator == AdvantageEstimator.F_COV:
+        calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            calculation_mask = data.batch["loss_mask"][:, -calculation_mask.size(1):]
+        advantages, returns, diagnostics = core_algos.compute_cross_context_f_cov_outcome_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            trajectory_cost_mask=data.batch["response_mask"],
+            index=data.non_tensor_batch["uid"],
+            expected_group_size=num_repeat,
+            config=config,
+            return_diagnostics=True,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.meta_info["f_cov_metrics"] = compute_cross_context_f_cov_metrics(**diagnostics)
+
     elif adv_estimator in (
         AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+        AdvantageEstimator.FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL,
         AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
@@ -359,6 +378,7 @@ def compute_advantage(
             adv_estimator
             == AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL
         )
+        offset_cost = adv_estimator == AdvantageEstimator.FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL
         thinking_cost = (
             adv_estimator
             == AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL
@@ -393,6 +413,8 @@ def compute_advantage(
             )
         elif capped_cost:
             advantage_fn = core_algos.compute_fixed_n_rb_capped_cost_aware_marginrl_outcome_advantage
+        elif offset_cost:
+            advantage_fn = core_algos.compute_fixed_n_rb_offset_cost_aware_marginrl_outcome_advantage
         else:
             advantage_fn = core_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage
 
@@ -437,6 +459,8 @@ def compute_advantage(
             metric_prefix = "fixed_n_rb_capped_thinking_marginrl"
         elif capped_cost:
             metric_prefix = "fixed_n_rb_capped_marginrl"
+        elif offset_cost:
+            metric_prefix = "fixed_n_rb_offset_marginrl"
         else:
             metric_prefix = "fixed_n_rb_marginrl"
         if efficient_reasoning_cost:
@@ -720,6 +744,8 @@ class RayPPOTrainer:
             AdvantageEstimator.RB_COST_AWARE_MAXRL,
             AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL_SUCCESS_GATED,
+            AdvantageEstimator.FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL,
+            AdvantageEstimator.F_COV,
             AdvantageEstimator.FIXED_N_RB_CAPPED_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_CAPPED_THINKING_COST_AWARE_MARGINRL,
             AdvantageEstimator.FIXED_N_RB_CAPPED_FIXED_Q_COST_AWARE_MARGINRL,
@@ -748,6 +774,10 @@ class RayPPOTrainer:
 
     def _validate_config(self):
         config = self.config
+        if config.algorithm.adv_estimator == AdvantageEstimator.F_COV:
+            expected_prompts = config.algorithm.get("f_cov_num_prompts")
+            if expected_prompts is not None and int(expected_prompts) != config.data.train_batch_size:
+                raise ValueError("f_cov_num_prompts must match the full data.train_batch_size")
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
         if config.actor_rollout_ref.actor.strategy == "megatron":
@@ -2259,6 +2289,9 @@ class RayPPOTrainer:
                         fixed_n_rb_marginrl_metrics = batch.meta_info.pop("fixed_n_rb_marginrl_metrics", None)
                         if fixed_n_rb_marginrl_metrics is not None:
                             metrics.update(fixed_n_rb_marginrl_metrics)
+                        f_cov_metrics = batch.meta_info.pop("f_cov_metrics", None)
+                        if f_cov_metrics is not None:
+                            metrics.update(f_cov_metrics)
                         if self.config.algorithm.get("save_shortest_rollout", False):
                             try:
                                 self._save_shortest_rollout(batch)

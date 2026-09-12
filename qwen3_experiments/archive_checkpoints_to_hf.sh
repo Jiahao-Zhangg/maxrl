@@ -10,6 +10,10 @@ While training is running, uploads and removes every checkpoint except the
 newest one. After a successful run, uploads and removes all remaining
 checkpoints. If training fails, the newest local checkpoint is retained.
 
+Set MAXRL_ARCHIVE_UPLOAD_LATEST=1 to also upload and remove the newest
+completed checkpoint as it becomes available, including during training.
+Local removal always requires successful upload and remote verification.
+
 Set MAXRL_ARCHIVE_MIN_FREE_GIB to a positive integer to also archive the
 newest completed checkpoint whenever free disk space falls below that limit.
 
@@ -40,6 +44,12 @@ UPLOAD_LOCK=${MAXRL_HF_UPLOAD_LOCK:-${REPO_ROOT}/outputs/.hf_checkpoint_upload.l
 MIN_FREE_GIB=${MAXRL_ARCHIVE_MIN_FREE_GIB:-0}
 PYTHON_BIN=${PYTHON_BIN:-python}
 TRAINING_EXIT_STATUS_FILE=${MAXRL_TRAINING_EXIT_STATUS_FILE:-}
+UPLOAD_LATEST=${MAXRL_ARCHIVE_UPLOAD_LATEST:-0}
+
+if [[ "${UPLOAD_LATEST}" != "0" && "${UPLOAD_LATEST}" != "1" ]]; then
+    echo "error: MAXRL_ARCHIVE_UPLOAD_LATEST must be 0 or 1" >&2
+    exit 2
+fi
 
 if [[ ! "${TRAINING_PID}" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: TRAINING_PID must be a positive integer" >&2
@@ -318,7 +328,9 @@ while true; do
 
     if (( training_active )); then
         retained_checkpoint_count=1
-        if disk_space_is_low; then
+        if [[ "${UPLOAD_LATEST}" == "1" ]]; then
+            retained_checkpoint_count=0
+        elif disk_space_is_low; then
             retained_checkpoint_count=0
             log "Free disk space is below ${MIN_FREE_GIB} GiB; archiving every completed checkpoint"
         fi
@@ -355,13 +367,21 @@ while true; do
         continue
     fi
 
-    if (( ${#checkpoints[@]} > 1 )); then
-        for ((index = 0; index < ${#checkpoints[@]} - 1; index++)); do
+    retained_checkpoint_count=1
+    if [[ "${UPLOAD_LATEST}" == "1" ]]; then
+        retained_checkpoint_count=0
+    fi
+    if (( ${#checkpoints[@]} > retained_checkpoint_count )); then
+        for ((index = 0; index < ${#checkpoints[@]} - retained_checkpoint_count; index++)); do
             if ! archive_checkpoint "${checkpoints[index]}"; then
                 break
             fi
         done
     fi
-    log "Training did not finish successfully at step ${FINAL_STEP}; retaining the newest checkpoint for recovery"
+    if [[ "${UPLOAD_LATEST}" == "1" ]]; then
+        log "Training did not finish successfully at step ${FINAL_STEP}; any unverified checkpoints remain local"
+    else
+        log "Training did not finish successfully at step ${FINAL_STEP}; retaining the newest checkpoint for recovery"
+    fi
     exit 1
 done
