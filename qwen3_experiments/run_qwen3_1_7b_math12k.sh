@@ -667,7 +667,6 @@ case "${MAXRL_UPLOAD_CHECKPOINTS:-0}" in
     1) ;;
     *) die "MAXRL_UPLOAD_CHECKPOINTS must be 0 or 1" ;;
 esac
-[[ -n "${TOTAL_TRAINING_STEPS}" ]] || die "Checkpoint uploads require MAXRL_TOTAL_TRAINING_STEPS"
 : "${MAXRL_CHECKPOINT_HF_REPO_PREFIX:?Set MAXRL_CHECKPOINT_HF_REPO_PREFIX for checkpoint uploads}"
 # Keep the trainer and uploader pointed at the same run and final step. These
 # settings remain configurable through their existing MAXRL environment vars.
@@ -682,5 +681,5 @@ for override in "$@"; do
     esac
 done
 PYTHON_BIN="$(command -v python)" exec bash "${SCRIPT_DIR}/run_with_checkpoint_upload.sh" \
-    "${CHECKPOINT_SAVE_PATH}" "${MAXRL_CHECKPOINT_HF_REPO_PREFIX}" "${TOTAL_TRAINING_STEPS}" \
+    "${CHECKPOINT_SAVE_PATH}" "${MAXRL_CHECKPOINT_HF_REPO_PREFIX}" "${TOTAL_TRAINING_STEPS:-auto}" \
     -- "${TRAIN_CMD[@]}"

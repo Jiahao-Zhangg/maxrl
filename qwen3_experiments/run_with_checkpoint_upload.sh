@@ -2,11 +2,12 @@
 
 # Supervise an already configured training command and upload completed
 # checkpoints, deleting local copies only after verified upload. Call after
-# environment setup.
+# environment setup. FINAL_STEP=auto reads the trainer's actual epoch-derived
+# step count; it does not add a step cap or change the optimizer schedule.
 set -euo pipefail
 
 if (( $# < 5 )) || [[ "$4" != "--" ]]; then
-    echo "Usage: run_with_checkpoint_upload.sh CHECKPOINT_DIR HF_REPO_PREFIX FINAL_STEP -- COMMAND [ARGS...]" >&2
+    echo "Usage: run_with_checkpoint_upload.sh CHECKPOINT_DIR HF_REPO_PREFIX FINAL_STEP_OR_auto -- COMMAND [ARGS...]" >&2
     exit 2
 fi
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -20,8 +21,8 @@ TRAINING_LOG=${LOG_DIR}/training.log
 UPLOAD_LOG=${LOG_DIR}/checkpoint_upload.log
 EXIT_STATUS_FILE=${LOG_DIR}/training.exit_status
 
-[[ "${FINAL_STEP}" =~ ^[1-9][0-9]*$ ]] || {
-    echo "FINAL_STEP must be a positive integer." >&2
+[[ "${FINAL_STEP}" == auto || "${FINAL_STEP}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "FINAL_STEP must be a positive integer or auto." >&2
     exit 2
 }
 for executable in setsid flock; do
@@ -33,7 +34,11 @@ if ! command -v hf >/dev/null && ! command -v huggingface-cli >/dev/null; then
 fi
 # Validate credentials without creating any remote repositories. Only saved
 # checkpoints are published by the uploader once training has begun.
-"${PYTHON_BIN}" - "${HF_REPO_PREFIX}-step_${FINAL_STEP}" <<'PY'
+VALIDATION_STEP=${FINAL_STEP}
+if [[ "${VALIDATION_STEP}" == auto ]]; then
+    VALIDATION_STEP=1
+fi
+"${PYTHON_BIN}" - "${HF_REPO_PREFIX}-step_${VALIDATION_STEP}" <<'PY'
 import sys
 
 from huggingface_hub import HfApi
@@ -70,10 +75,37 @@ trap 'exit 143' TERM
 
 echo "Checkpoints will upload to ${HF_REPO_PREFIX}-step_<N> (public); local copies are deleted only after verification."
 echo "Checkpoint upload log: ${UPLOAD_LOG}"
+# tee already replaces this per-attempt log. Clear it before the child starts
+# so auto-detection cannot race with tee and consume a previous run's header.
+: >"${TRAINING_LOG}"
 # Wait for Python and tee together before publishing the actual exit status.
 setsid bash -o pipefail -c 'log=$1; shift; "$@" 2>&1 | tee "$log"' \
     _ "${TRAINING_LOG}" "$@" &
 TRAIN_PID=$!
+if [[ "${FINAL_STEP}" == auto ]]; then
+    echo "Waiting for the trainer's epoch-derived total step count."
+    while true; do
+        resolved_final_step=$(sed -nE 's/.*Total training steps: ([1-9][0-9]*)([^0-9].*)?$/\1/p' "${TRAINING_LOG}" | head -n 1)
+        if [[ "${resolved_final_step}" =~ ^[1-9][0-9]*$ ]]; then
+            FINAL_STEP=${resolved_final_step}
+            echo "Checkpoint uploader final step: ${FINAL_STEP} (reported by trainer)."
+            break
+        fi
+        if ! kill -0 "${TRAIN_PID}" 2>/dev/null; then
+            training_status=0
+            wait "${TRAIN_PID}" || training_status=$?
+            TRAIN_PID=""
+            printf '%s\n' "${training_status}" >"${EXIT_STATUS_FILE}.tmp"
+            mv -- "${EXIT_STATUS_FILE}.tmp" "${EXIT_STATUS_FILE}"
+            echo "Training ended before its total step count was available; retaining every local checkpoint." >&2
+            if (( training_status != 0 )); then
+                exit "${training_status}"
+            fi
+            exit 1
+        fi
+        sleep 1
+    done
+fi
 PYTHON_BIN="${PYTHON_BIN}" MAXRL_TRAINING_EXIT_STATUS_FILE="${EXIT_STATUS_FILE}" \
     MAXRL_ARCHIVE_UPLOAD_LATEST=1 \
     setsid bash "${SCRIPT_DIR}/archive_checkpoints_to_hf.sh" \
