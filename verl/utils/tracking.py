@@ -55,7 +55,7 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
-
+        self._finished = False
         self.wandb_id = None
 
         if "tracking" in default_backend or "wandb" in default_backend:
@@ -157,18 +157,32 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
+    def finish(self, exit_code=0):
+        """Flush and close every configured backend exactly once."""
+        if self._finished:
+            return
+        self._finished = True
+
         if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
+            self.logger["wandb"].finish(exit_code=exit_code)
         if "swanlab" in self.logger:
             self.logger["swanlab"].finish()
         if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
+            self.logger["vemlp_wandb"].finish(exit_code=exit_code)
         if "tensorboard" in self.logger:
             self.logger["tensorboard"].finish()
 
-        if "clearnml" in self.logger:
-            self.logger["clearnml"].finish()
+        if "clearml" in self.logger:
+            self.logger["clearml"].finish()
+
+    def __del__(self):
+        # This is only a fallback for callers that do not explicitly finish.
+        # Interpreter shutdown is not deterministic, so training entry points
+        # must call ``finish`` themselves.
+        try:
+            self.finish(exit_code=0)
+        except Exception:
+            pass
 
 
 class ClearMLLogger:

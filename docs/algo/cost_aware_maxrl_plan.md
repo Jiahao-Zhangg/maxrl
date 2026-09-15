@@ -1,0 +1,197 @@
+# Cost-Aware MaxRL
+
+## Standard MaxRL: Advantage and Gradient
+
+For one prompt $x$, let the policy's success probability be
+
+$$
+p_\theta(x) = \mathbb{E}_{y\sim\pi_\theta(\cdot\mid x)}[r(y)],
+\qquad
+S_i = \nabla_\theta\log\pi_\theta(y_i\mid x),
+$$
+
+where $r_i\in\{0,1\}$. With $N$ rollouts, MaxRL optimizes the order-$N$
+truncation of the log-likelihood expansion:
+
+$$
+J_{\mathrm{MaxRL}}^{(N)}(x)
+= -\sum_{k=1}^{N}\frac{(1-p_\theta(x))^k}{k}.
+$$
+
+Its population gradient is
+
+$$
+\nabla_\theta J_{\mathrm{MaxRL}}^{(N)}(x)
+= \frac{1-(1-p)^N}{p}\,\nabla_\theta p
+= \frac{1-(1-p)^N}{p}\,\mathbb{E}[rS].
+$$
+
+For sampled rewards, let $K=\sum_i r_i$ and
+$\bar r=K/N$. The practical estimator is
+
+$$
+\widehat g_N(x) =
+\begin{cases}
+\displaystyle\frac{1}{K}\sum_{i=1}^{N}r_iS_i, & K>0,\\
+0, & K=0.
+\end{cases}
+$$
+
+This is unbiased for the gradient above: a batch contains a success with
+probability $1-(1-p)^N$, while the conditional mean score of successful
+trajectories is $\mathbb{E}[S\mid r=1]=\mathbb{E}[rS]/p$.
+
+To express this estimator as a sequence-averaged PPO loss, MaxRL uses the
+zero-mean score-function control variate
+$V_N=N^{-1}\sum_i S_i$. The resulting scalar trajectory advantage is
+
+$$
+\boxed{A_i^{\mathrm{MaxRL}}
+= \frac{r_i-\bar r}{\bar r}
+= \frac{N r_i}{K}-1}, \qquad K>0,
+$$
+
+with all advantages set to zero when $K=0$. Thus a successful trajectory has
+advantage $N/K-1$, while a failed trajectory has advantage $-1$. Broadcasting
+this scalar across its response tokens gives
+
+$$
+\frac{1}{N}\sum_{i=1}^{N}A_i^{\mathrm{MaxRL}}S_i
+= \frac{1}{K}\sum_{i=1}^{N}r_iS_i
+- \frac{1}{N}\sum_{i=1}^{N}S_i.
+$$
+
+The last term has expectation zero only when it is applied unconditionally,
+including to $K=0$ groups. The current implementation instead gates the whole
+centered update when $K=0$, and in `verl/trainer/ppo/core_algos.py` uses
+`(r_i - mean_reward) / (mean_reward + epsilon)` and then masks padding. Its
+`epsilon=1e-6` makes the $K>0$ result negligibly smaller than the exact formula
+and produces zero when every rollout fails.
+
+With `loss_agg_mode=seq-mean-token-sum`, each $S_i$ is the sum of token score
+functions and the equation above is matched directly. For a minibatch of $B$
+trajectories, the current `token-mean` mode instead multiplies that gradient by
+$B/\sum_i L_i$. This preserves the fixed-minibatch direction but makes its
+scale depend on generated lengths.
+
+See the [MaxRL paper](https://arxiv.org/abs/2602.02710) and
+[official project explanation](https://zanette-labs.github.io/MaxRL/) for the
+objective and unbiased-estimator derivation.
+
+## Cost-Aware Goal
+
+For each prompt, sample $N$ trajectories. Let $r_i \in \{0,1\}$ be the math
+grader reward, $L_i$ the number of generated tokens (from
+`response_mask.sum(-1)`), and $K = \sum_i r_i$. Define
+
+$$
+L_{\mathrm{ref}} = \frac{L_{\max}}{2}, \qquad
+c_i = \frac{L_i}{L_{\mathrm{ref}}}.
+$$
+
+The requested per-prompt policy-gradient estimator is
+
+$$
+G = \frac{1}{K}\sum_{i=1}^{N}\frac{r_i}{c_i}S_i,
+\qquad
+S_i = \nabla_\theta \log \pi_\theta(y_i\mid x).
+$$
+
+This variant favors correct, shorter trajectories. Scaling by
+$L_{\mathrm{ref}}$ fixes the overall gradient scale but does not change the
+relative preference between two response lengths.
+
+## Cost-Aware Advantage
+
+The implemented run caps inverse cost at $w_{\max}=4$. Define
+
+$$
+w_i = \min\left(\frac{1}{c_i}, w_{\max}\right).
+$$
+
+The capped target and its MaxRL control-variate advantage are
+
+$$
+G_{\mathrm{cap}} = \frac{1}{K}\sum_{i=1}^{N}r_iw_iS_i,
+\qquad
+\boxed{A_i = \frac{N}{K}r_iw_i - 1}.
+$$
+
+when $K>0$, and set every advantage in the group to zero when $K=0$.
+The gated `-1` term follows the repository's practical MaxRL centering
+convention. Because it is omitted when $K=0$, it is not the unconditional
+zero-mean control variate. Broadcast each trajectory's scalar advantage over
+its valid response tokens and keep padding at zero.
+
+Do **not** divide by $\sum_i r_i/c_i$. That would normalize the
+cost-weighted rewards and optimize a different estimator. Do not apply group
+standard-deviation normalization either.
+
+For example, with $N=16$, $K=4$, and $L_{\max}=4096$, a correct
+1,024-token response has $c_i=0.5$, $w_i=2$, and $A_i=7$; an incorrect
+response has $A_i=-1$.
+
+## Stability Policy
+
+Inverse length can be very large for unusually short outputs. The estimator
+therefore computes
+
+```text
+inverse_cost = (cost_reference_tokens / response_length).clamp(max=max_inverse_cost)
+```
+
+The training launcher sets `max_inverse_cost=4.0`. With
+`cost_reference_tokens=2048`, the cap affects trajectories shorter than 512
+tokens; a trajectory of exactly 512 tokens has inverse cost 4 and is not
+counted as capped. The implementation clamps response length to at least one
+before division and computes rewards, lengths, costs, and advantages without
+autograd. Setting `algorithm.max_inverse_cost=null` restores the uncapped
+estimator.
+
+## Configuration and Monitoring
+
+The estimator is registered as `cost_aware_maxrl` in
+`verl/trainer/ppo/core_algos.py`. The Qwen3 Math12K run uses:
+
+```yaml
+algorithm:
+  adv_estimator: cost_aware_maxrl
+  cost_reference_tokens: 2048  # data.max_response_length / 2
+  max_inverse_cost: 4.0
+actor_rollout_ref:
+  actor:
+    loss_agg_mode: seq-mean-token-sum
+```
+
+`seq-mean-token-sum` makes the actor's sequence-average gradient match
+$G_{\mathrm{cap}}$. The separate launcher leaves the original experiment and
+its checkpoints unchanged:
+
+```bash
+bash qwen3_experiments/run_qwen3_1_7b_math12k_cost_aware.sh
+```
+
+The normal `console` and `wandb` loggers record these metrics every global
+training step:
+
+- `cost_aware_maxrl/trajectory_tokens_{mean,max,min}`
+- `cost_aware_maxrl/cost_{mean,max,min}` for the uncapped $c_i$
+- `cost_aware_maxrl/cap_ratio`, the fraction of trajectories whose inverse
+  cost was reduced by the cap
+
+## Tests and Experiment
+
+CPU tests in `tests/trainer/ppo/test_cost_aware_maxrl_on_cpu.py` cover mixed
+lengths, $K=0$, all-success groups, multiple prompt groups, padding, capped and
+uncapped costs, metrics, invalid configuration, and trainer dispatch. The core
+identity is
+
+$$
+\frac{1}{N}\sum_i (A_i+1)S_i
+= \frac{1}{K}\sum_i r_iw_iS_i.
+$$
+
+Compare the existing MaxRL run with capped cost-aware MaxRL using the same
+model, data, seed, rollout count, and five epochs. Report validation accuracy
+together with response length and correct answers per generated token;
+accuracy alone would hide the cost tradeoff.
