@@ -43,6 +43,8 @@ wandb/
 # Dataset files
 *.parquet
 *.json
+# Reusable Eval1/2/3 plotting configurations (data and local run manifests stay ignored).
+!/qwen3_experiments/plot_math500_eval[123]_figure2*.json
 *.csv
 *.h5
 *.hdf5
