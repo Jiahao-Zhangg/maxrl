@@ -1,0 +1,5 @@
+run,sft_step,seed,n_rollouts,complete,rl_updates,training_rollouts,training_goal_successes,training_shortest_successes,training_steps_with_success,last_training_success_step,initial_goal_successes,initial_goal_rate,final_goal_successes,final_goal_rate,initial_shortest_successes,initial_shortest_rate,final_shortest_successes,final_shortest_rate,eval_samples_per_point
+full_rb_ck2450_seed0_bs256_n16_4gpu,2450,0,16,True,5001,20484096,2,2,2,10,4,6.25e-05,0,0.0,3,4.6875e-05,0,0.0,64000
+full_rb_ck2450_seed1_bs256_n16_4gpu,2450,1,16,True,5001,20484096,8,8,3,12,7,0.000109375,0,0.0,4,6.25e-05,0,0.0,64000
+full_rb_ck3000_seed0_bs256_n16_4gpu,3000,0,16,True,5001,20484096,10416464,10416135,5001,5001,9,0.000140625,52446,0.81946875,5,7.8125e-05,52446,0.81946875,64000
+full_rb_ck3250_seed0_bs256_n16_4gpu,3250,0,16,True,5001,20484096,14388653,14388401,5001,5001,32,0.0005,56273,0.879265625,14,0.00021875,56273,0.879265625,64000

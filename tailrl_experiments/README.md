@@ -1,5 +1,10 @@
 # TailRL text-maze pilot with per-context RB
 
+For full four-GH200 training, seed/sample-count variants, and the independent ARM
+environment, see [README.full.aarch64.md](README.full.aarch64.md).
+The [2026-09-16 full-run results](../docs/evaluation_results/textmaze_rb_20260916/README.md)
+summarize four completed RB runs separately from the reduced-data pilot below.
+
 This experiment uses TailRL's released 17x17 mazes, tiny Qwen2 model, SFT
 checkpoints, binary goal verifier, and vendored verl trainer. It ports the exact
 function body of MaxRL's `compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage`

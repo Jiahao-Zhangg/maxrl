@@ -50,6 +50,8 @@ wandb/
 # Curated aggregate evaluation results only; raw rollouts stay under outputs/.
 !/docs/evaluation_results/math_eval_matrix_20260916/*.csv
 !/docs/evaluation_results/math_eval_matrix_20260916/*.json
+!/docs/evaluation_results/textmaze_rb_20260916/*.csv
+!/docs/evaluation_results/textmaze_rb_20260916/*.json
 *.h5
 *.hdf5
 
