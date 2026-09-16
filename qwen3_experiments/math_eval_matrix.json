@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "models": [
+    {"key": "f_cov_offset512", "label": "F-Cov L+512", "repo": "zjhhhh/f-cov-offset512-qwen3-1.7b-base-math12k-49fbccca-step_150", "revision": "d111ad8e5ac8d4448c32400625b703643ca923ee", "format": "fsdp", "step": 150},
+    {"key": "fixed_n_rb_offset512", "label": "Fixed-N RB L+512", "repo": "zjhhhh/fixed-n-rb-offset512-qwen3-1.7b-base-math12k-8be8236f-step_150", "revision": "70df442d073f6cd17ff985d83524af137e4f089d", "format": "fsdp", "step": 150},
+    {"key": "qwen3_base", "label": "Qwen3-1.7B-Base", "repo": "Qwen/Qwen3-1.7B-Base", "revision": "ea980cb0a6c2ae4b936e82123acc929f1cec04c1", "format": "huggingface"},
+    {"key": "efficient_reasoning", "label": "Efficient Reasoning", "repo": "zjhhhh/efficient-reasoning-qwen3-1.7b-base-math12k-step_150", "revision": "4e74706114a80769ff57c5e99ed1b8398a0c28a1", "format": "deepspeed", "step": 150},
+    {"key": "l1_exact", "label": "L1-Exact", "repo": "zjhhhh/l1-exact-mathverify-qwen3-1.7b-base-math12k-random100to4000-seed42-step_300", "revision": "379de27e6d90065d22e5d57982cfb041c540772d", "format": "fsdp", "step": 300}
+  ],
+  "datasets": [
+    {"key": "math500", "label": "MATH-500", "repo": "HuggingFaceH4/MATH-500", "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be", "file": "test.jsonl", "question_field": "problem", "answer_field": "answer", "expected_rows": 500},
+    {"key": "minervamath", "label": "Minerva Math", "repo": "math-ai/minervamath", "revision": "ee46ddc498933b1977577953250ca5c66be64f96", "file": "test.jsonl", "question_field": "question", "answer_field": "answer", "expected_rows": 272},
+    {"key": "olympiadbench", "label": "OlympiadBench", "repo": "math-ai/olympiadbench", "revision": "4faaf1e6ec17d11a4218a9bf4c049ecaf954dd84", "file": "test.parquet", "question_field": "question", "answer_field": "final_answer", "expected_rows": 674},
+    {"key": "amc22_23", "label": "AMC22+23", "repo": "watermelonhjg/AMC_22_23", "revision": "04d0a9e73a697d41a3d6b9d9e5044f29cdd29d03", "file": "data/test-00000-of-00001.parquet", "question_field": "problem", "answer_field": "answer", "expected_rows": 83}
+  ],
+  "evals": {
+    "eval1": {"budgets": [256, 512, 1024, 2048, 4096], "seeds": [0], "samples_per_prompt": 4},
+    "eval2": {"budgets": [512, 1024, 2048, 4096, 8192], "seeds": [0, 1, 2], "stop_on_first_success": true},
+    "eval3": {"budgets": [512, 1024, 2048, 4096, 8192], "seeds": [0, 1, 2]}
+  },
+  "sampling": {"temperature": 0.6, "top_p": 0.95, "top_k": -1, "per_rollout_cap": 4096, "max_batch_size": 256, "max_prompt_len": 8192, "gpu_memory_utilization": 0.7, "max_num_batched_tokens": 16384},
+  "grader": {"class": "verl.workers.reward_manager.multi_thread_naive.MathVerifyScorer", "timeout_seconds": 1, "workers": 8},
+  "prompt_suffix": "\nPlease reason step by step, and put your final answer within \\boxed{{}}."
+}
