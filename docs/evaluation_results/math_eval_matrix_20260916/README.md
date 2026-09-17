@@ -68,10 +68,16 @@ BF16, temperature 0.6, top-p 0.95, top-k -1; Eval2/3 per-response cap 4096 token
   checksum-verified and independently re-audited before reuse; Eval1 was unchanged.
 
 The CSV receipts identify each completed point and record hashes of its original
-summary and raw artifacts. Those raw artifacts are **not included** in GitHub.
-This publication excludes prompts, gold answers, generated responses/token IDs,
-benchmark snapshots, checkpoints, training logs, credentials, and local filesystem
-paths. It is a compact result snapshot, not a standalone resumable run directory.
+summary and raw artifacts. The **541 completed points' original trajectories are
+available as [GitHub Release assets](https://github.com/Jiahao-Zhangg/maxrl/releases/tag/math-eval-matrix-20260916-raw-541)**,
+with download links, content descriptions, and checksum instructions in
+[Raw trajectories](RAW_TRAJECTORIES.md). Responses, output token IDs, gold answers,
+scores, and budget ledgers are retained; only machine-local summary metadata is
+redacted. The raw data are not committed to Git history.
+
+This publication excludes full input dataset snapshots, checkpoints, training
+logs, credentials, incomplete attempts, and local filesystem paths. It is an
+analysis snapshot, not a standalone resumable run directory.
 
 The evaluator source hashes in `run_manifest.json` describe the actual executed
 generation/accounting code. Documentation, plotting, and publication metadata can
