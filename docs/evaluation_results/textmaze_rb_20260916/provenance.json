@@ -1,0 +1,187 @@
+{
+  "checkpoints_included": false,
+  "dataset": {
+    "dataset": "max-rl/maze_17x17_diverse_1.3m",
+    "duplicate_grids": 0,
+    "eval_count": 1000,
+    "excluded_eval": 1000,
+    "excluded_sft": 256,
+    "files_sha256": {
+      "full_eval.parquet": "79bd697b38702a74b05d3443d36213e0b42d011630fb98a0a4e171ee8080d1e1",
+      "full_train.parquet": "6b28a3397648972545601e550e4951c8bf5b91ca4ac5396f9a6d5cd3c11360d3"
+    },
+    "raw_sha256": "c1d055238c80a042f89b5f661e6779773f16cadb084c29d39f0c3eddb4fd59bc",
+    "revision": "9b9ed56991cb045ba4227d9120dad337085db439",
+    "selection": "entire corpus, excluding released eval1000/SFT test grids and duplicate grids",
+    "source_count": 1299992,
+    "train_count": 1298992,
+    "train_eval_overlap": 0,
+    "train_sft_test_overlap": 0
+  },
+  "estimator_port": {
+    "cost": "max(generated action-prefix length, BFS shortest distance)",
+    "full_config_adapter": {
+      "estimator_function_unchanged": true,
+      "global_token_mean": "rank loss multiplied by world_size * local_tokens / global_tokens"
+    },
+    "maxrl_revision": "cd26c5a7b08a51916c54533b892e4209e48ce3f9",
+    "reward": "original binary goal reach with DONE required",
+    "source_function": "compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage",
+    "source_function_sha256": "f69822ba0255d0b69d180bdea4ef5d4aca3de9d64765c8791fdb47a2135770ae",
+    "tailrl_revision": "5682c6ac03387355e017ce966693266bb148fa10"
+  },
+  "hardware": {
+    "gpu_type": "NVIDIA GH200",
+    "gpus_per_run": 4
+  },
+  "model_inputs": {
+    "checkpoints": [
+      {
+        "checkpoint_step": 3000,
+        "model_cpu_forward_passed": true,
+        "parameters": 3944704,
+        "prompt_tokens": 310,
+        "weights_sha256": "9692c0d0d60f4bc9f5c661f9ecb228996861c74e2645d802ca3312e6616acd99"
+      },
+      {
+        "checkpoint_step": 2450,
+        "model_cpu_forward_passed": true,
+        "parameters": 3944704,
+        "prompt_tokens": 310,
+        "weights_sha256": "07cfcc01599341cc87231c1aa13d18faa379e795b0938bc4e2ff106ef93cb654"
+      },
+      {
+        "checkpoint_step": 3250,
+        "model_cpu_forward_passed": true,
+        "parameters": 3944704,
+        "prompt_tokens": 310,
+        "weights_sha256": "68685692f6e1a83e643432a64b9ed942978350ba0d8cc144fee65829b0c98a6d"
+      }
+    ],
+    "repo": "max-rl/maze_v2_sft_ckpts_guanning",
+    "revision": "145e5e2d1ddb160994eb6b2daabcf2362d5d00ce"
+  },
+  "model_weight_hashes_rechecked_for_publication": false,
+  "not_run_variants": [
+    {
+      "n_rollouts": 16,
+      "seed": 2,
+      "sft_step": 2450
+    },
+    {
+      "n_rollouts": 32,
+      "seed": 0,
+      "sft_step": 2450
+    }
+  ],
+  "publication_source_sha256": {
+    "qwen3_experiments/checkpoint_handoff.py": "9f890c0e468df3b08a09389e4f5565b899510d0e287cf5ba92b57568ef9eea9c",
+    "tailrl_experiments/activate_text_maze.aarch64.sh": "92e70e66773a0620e8eff617c8359ca46229a4cabcc53bd98dcaaeb0101b6992",
+    "tailrl_experiments/check_text_maze_gpu.py": "d87cb0f047342392de8c2f3709783d4ee9eb713d51c9d08c642b6bab90169929",
+    "tailrl_experiments/deactivate_text_maze.aarch64.sh": "4540bcfafbc3bd7fa72d11c3bd868dd9526d74c38550ad5252129ea7ddd729be",
+    "tailrl_experiments/install_text_maze_adapter.py": "c464f6c6afc0957573b16aad9832b641f03a7f812d8bbf23d5926b35f892a2b6",
+    "tailrl_experiments/install_text_maze_full_adapter.py": "9ca88ccfe63392f7854a5e4a7309fb868de5ecb7c3cc05ece993b95e30fe451f",
+    "tailrl_experiments/maze_binary_goal_cost_reward.py": "f973d26ca5e9877b626009aeb35befccf6db311c8e14913d40ed9b40462435e4",
+    "tailrl_experiments/maze_rb_adapter.py": "fae72f037c193d9133302443ec36f058fcb6d2ea5cffc4a17637951ab8bb3b57",
+    "tailrl_experiments/prepare_text_maze_full.py": "1e83bd35b34f9ce8db65d83f878162b3ed65b75b38429b76e5b01736606afcc3",
+    "tailrl_experiments/prepare_text_maze_pilot.py": "c70dc41cae0f8de5ff065c464f2e1d89e4e2841a3e9089ec00a645dc84c556bc",
+    "tailrl_experiments/queue_full_rb.py": "86d340b6329abd65c94898fa8d2fc3ffa9e1b15978e23120bbf01417cfe40e5e",
+    "tailrl_experiments/run_full_rb_on_slurm.sh": "9e58b1204edaf1343eb3c6a62016823add2c3b9ad992c90025c1bfb7e2aac32f",
+    "tailrl_experiments/run_text_maze_rb.py": "e832fb69d60a122d3ddf07757be69e02e6ead48e37f56f3679e890bc79145984",
+    "tailrl_experiments/run_text_maze_rb_full.py": "dc9630fa95d279884b0e3ce2b6b5fff938de5c31cb1920aa7c5d5a9aee8d56b6",
+    "tailrl_experiments/run_text_maze_rb_sweep.py": "ad1276ea5669aa827818eef0cb9141dd49cbbed2f173c2645014106be36d4100",
+    "tailrl_experiments/setup_text_maze_rb.sh": "abf981d8d88cfc55dfa5c11a6ae3200e652df4edfeff0349e91e3adda7f48b82",
+    "tailrl_experiments/summarize_text_maze_rb.py": "125bef174bcbb52511e5af8bc828864b7672dc3ec779e534143906276de68c2d"
+  },
+  "raw_trajectories_included": false,
+  "raw_validation_regraded_for_publication": false,
+  "runs": {
+    "full_rb_ck2450_seed0_bs256_n16_4gpu": {
+      "completion": {
+        "checkpoint_step": 2450,
+        "n_rollouts": 16,
+        "seed": 0,
+        "smoke": false,
+        "step": 5001,
+        "world_size": 4
+      },
+      "duplicate_training_step_count": 0,
+      "duplicate_validation_step_count": 0,
+      "files_sha256": {
+        "COMPLETE.json": "1491db44892edbf57cfb801315d4f688699abf0c84b42cdc80788e17552f0732",
+        "config.yaml": "37d5741e39a51c237c329855759d234def5ce6243a4697aa984cfd198bff3c94",
+        "metrics.jsonl": "5b51e661a701438bc01ae58cdcac08e06d57ebcc4ec153af142958d8a9c83a58"
+      },
+      "final_checkpoint_pointer": 5001,
+      "nonempty_hf_weight_files_present": true,
+      "training_step_count": 5001,
+      "validation_point_count": 7
+    },
+    "full_rb_ck2450_seed1_bs256_n16_4gpu": {
+      "completion": {
+        "checkpoint_step": 2450,
+        "n_rollouts": 16,
+        "seed": 1,
+        "smoke": false,
+        "step": 5001,
+        "world_size": 4
+      },
+      "duplicate_training_step_count": 0,
+      "duplicate_validation_step_count": 0,
+      "files_sha256": {
+        "COMPLETE.json": "fe5e591f343e5cf0feedb4abf7dd4fa234842d618d73c9b3339926e7a672a9a8",
+        "config.yaml": "e071529244915142f15b7566925b5205ff0ad6739def9cf9c3ad573fcfee330e",
+        "metrics.jsonl": "f67494bbf8a5cf1815808e847beb60c2420a7722c4e8be082c10fc711cb1b9a8"
+      },
+      "final_checkpoint_pointer": 5001,
+      "nonempty_hf_weight_files_present": true,
+      "training_step_count": 5001,
+      "validation_point_count": 7
+    },
+    "full_rb_ck3000_seed0_bs256_n16_4gpu": {
+      "completion": {
+        "checkpoint_step": 3000,
+        "n_rollouts": 16,
+        "seed": 0,
+        "smoke": false,
+        "step": 5001,
+        "world_size": 4
+      },
+      "duplicate_training_step_count": 0,
+      "duplicate_validation_step_count": 0,
+      "files_sha256": {
+        "COMPLETE.json": "50c60d7a94ee243b1d5bb9c082232450ba5066077d090519e55fa6dc40c19bb0",
+        "config.yaml": "6c66e96595c74a557453f40e09d086aba2ca6b3f13354c93dd65d3da90cceece",
+        "metrics.jsonl": "b3b7fd389c7ff0dd1963f7a4b5d799d5060acea96a18b54c030fda428e170bf0"
+      },
+      "final_checkpoint_pointer": 5001,
+      "nonempty_hf_weight_files_present": true,
+      "training_step_count": 5001,
+      "validation_point_count": 7
+    },
+    "full_rb_ck3250_seed0_bs256_n16_4gpu": {
+      "completion": {
+        "checkpoint_step": 3250,
+        "n_rollouts": 16,
+        "seed": 0,
+        "smoke": false,
+        "step": 5001,
+        "world_size": 4
+      },
+      "duplicate_training_step_count": 0,
+      "duplicate_validation_step_count": 0,
+      "files_sha256": {
+        "COMPLETE.json": "3ef1c1b6f4fc6876d255add6af78f067e9806e84eb86648d9f9017db37918341",
+        "config.yaml": "42611354baf5b168da8bfea99417c5ba911c3c886b64edd41e046de713b5670d",
+        "metrics.jsonl": "1248c7546ecc7ca3206cf4bb46ac7db1e67d15398e04237db307f72f502fff4a"
+      },
+      "final_checkpoint_pointer": 5001,
+      "nonempty_hf_weight_files_present": true,
+      "training_step_count": 5001,
+      "validation_point_count": 7
+    }
+  },
+  "schema_version": 1,
+  "scope": "Four completed full-data per-context RB N=16 runs; aggregate metrics only",
+  "snapshot_date": "2026-09-16"
+}

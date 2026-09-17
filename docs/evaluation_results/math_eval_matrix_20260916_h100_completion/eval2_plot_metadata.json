@@ -1,0 +1,66 @@
+{
+  "display_models": [
+    {
+      "color": "#ff7f00",
+      "edge": "black",
+      "edgewidth": 0.9,
+      "group": "Our Methods:",
+      "label": "CAM - Shared Budget",
+      "marker": "o",
+      "model": "f_cov_offset512",
+      "size": 44
+    },
+    {
+      "color": "#e41a1c",
+      "edge": "black",
+      "edgewidth": 0.9,
+      "group": "Our Methods:",
+      "label": "CAM - Individual Budget",
+      "marker": "o",
+      "model": "fixed_n_rb_offset512",
+      "size": 44
+    },
+    {
+      "color": "#ff7f00",
+      "edge": "#ff7f00",
+      "edgewidth": 0.5,
+      "group": "Baselines:",
+      "label": "Base",
+      "marker": "D",
+      "model": "qwen3_base",
+      "size": 42
+    },
+    {
+      "color": "#377eb8",
+      "edge": "#377eb8",
+      "edgewidth": 0.5,
+      "group": "Baselines:",
+      "label": "ER",
+      "marker": "^",
+      "model": "efficient_reasoning",
+      "size": 48
+    },
+    {
+      "color": "#984ea3",
+      "edge": "#984ea3",
+      "edgewidth": 0.5,
+      "group": "Baselines:",
+      "label": "L1",
+      "marker": "*",
+      "model": "l1_exact",
+      "size": 72
+    }
+  ],
+  "fitted_lines_are_measurements": false,
+  "macro_dataset_sizes": {
+    "amc22_23": 83,
+    "math500": 500,
+    "minervamath": 272,
+    "olympiadbench": 674
+  },
+  "macro_definition": "For each seed, mean(solved_questions / dataset_size) over all configured datasets; then mean and sample SD over seeds",
+  "macro_requires_all_datasets_and_seeds": true,
+  "reference": "https://arxiv.org/pdf/2503.04697v2#page=6",
+  "source_point_fingerprint": "b61f9129970f51084b7f1ae9a6e001c3c621cbcb6c16d98ba026905d0ef59a1e",
+  "style": "Measured means with log2-budget ordinary least squares fits and dashed 1.5x extensions"
+}

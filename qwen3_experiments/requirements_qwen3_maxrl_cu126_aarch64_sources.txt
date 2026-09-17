@@ -1,0 +1,10 @@
+# Native-source lock for the Qwen3-1.7B Math12K experiments on NVIDIA GH200.
+# Target: Python 3.10, Linux aarch64, PyTorch 2.6, CUDA 12.6 runtime.
+# The launcher installs each entry separately with --no-build-isolation.
+
+# Torch 2.6 expects Triton 3.2, whose official index has no aarch64 wheel.
+triton @ https://github.com/triton-lang/triton/archive/refs/tags/v3.2.0.tar.gz#subdirectory=python
+vllm @ https://files.pythonhosted.org/packages/e6/d6/9d412cdaa92c3ab6250cef51217d37395b2aa372c6c14f90b1668adbbf63/vllm-0.8.4.tar.gz
+tensordict @ https://github.com/pytorch/tensordict/archive/refs/tags/v0.6.2.tar.gz
+flash-attn==2.7.4.post1
+flashinfer-python==0.2.2.post1

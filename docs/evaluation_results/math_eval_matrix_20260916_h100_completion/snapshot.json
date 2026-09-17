@@ -1,0 +1,27 @@
+{
+  "baseline_manifest_fingerprint": "32cb7610866d552c053135cfb3f330fd677a2fdf2e7827e837a5f0553bfbfb4b",
+  "baseline_points": 541,
+  "baseline_raw_availability_provenance": "Restored from the existing verified GitHub Release assets; all original rollout hashes match published receipts.",
+  "baseline_raw_ledgers_available": true,
+  "completed_points": 700,
+  "continuation_manifest_fingerprint": "787c01c3e0b3145ac653cf0b3c465f050f13ef363651dbf92dc1958fc86351ad",
+  "continuation_points": 159,
+  "continuation_raw_ledger_audit": "passed",
+  "protocols": {
+    "eval1": {
+      "completed": 100,
+      "requested": 100
+    },
+    "eval2": {
+      "completed": 300,
+      "requested": 300
+    },
+    "eval3": {
+      "completed": 300,
+      "requested": 300
+    }
+  },
+  "raw_collection_completed_points": 700,
+  "raw_collection_index": "raw_trajectories_700_manifest.json",
+  "requested_points": 700
+}

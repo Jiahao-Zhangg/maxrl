@@ -43,7 +43,17 @@ wandb/
 # Dataset files
 *.parquet
 *.json
+# Reusable Eval1/2/3 plotting configurations (data and local run manifests stay ignored).
+!/qwen3_experiments/plot_math500_eval[123]_figure2*.json
+!/qwen3_experiments/math_eval_matrix.json
 *.csv
+# Curated aggregate evaluation results only; raw rollouts stay under outputs/.
+!/docs/evaluation_results/math_eval_matrix_20260916/*.csv
+!/docs/evaluation_results/math_eval_matrix_20260916/*.json
+!/docs/evaluation_results/math_eval_matrix_20260916_h100_completion/*.csv
+!/docs/evaluation_results/math_eval_matrix_20260916_h100_completion/*.json
+!/docs/evaluation_results/textmaze_rb_20260916/*.csv
+!/docs/evaluation_results/textmaze_rb_20260916/*.json
 *.h5
 *.hdf5
 
