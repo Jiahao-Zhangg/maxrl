@@ -1,0 +1,39 @@
+{
+  "completed_points": 700,
+  "continuation_rollouts_byte_identical": true,
+  "duplicate_points": 0,
+  "missing_points": 0,
+  "new_points": 159,
+  "original_points_retained": 541,
+  "protocols": {
+    "eval1": 100,
+    "eval2": 300,
+    "eval3": 300
+  },
+  "raw_and_prompt_checksums_match_all_700_receipts": true,
+  "total_output_tokens": 647597893,
+  "total_rollouts": 1026008,
+  "unchanged_result_and_provenance_files": [
+    "eval3_display_fits.csv",
+    "eval3_questions_solved.png",
+    "eval3_plot_metadata.json",
+    "eval2_display_fits.csv",
+    "eval1_mean_at_4.csv",
+    "eval3_macro_average.csv",
+    "eval2_macro_average.csv",
+    "continuation_run_manifest.json",
+    "baseline_run_manifest.json",
+    "point_receipts.csv",
+    "eval2_questions_solved.svg",
+    "eval2_plot_metadata.json",
+    "all_points.csv",
+    "eval2_questions_solved.pdf",
+    "eval1_source_manifest.json",
+    "continuation_ledger_audit.json",
+    "eval3_questions_solved.csv",
+    "eval3_questions_solved.svg",
+    "eval2_questions_solved.png",
+    "eval3_questions_solved.pdf",
+    "eval2_questions_solved.csv"
+  ]
+}

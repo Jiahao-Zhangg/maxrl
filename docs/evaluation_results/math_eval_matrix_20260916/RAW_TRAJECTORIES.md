@@ -1,5 +1,10 @@
 # Raw trajectories for the 541/700-point snapshot
 
+**Completion available:** the release now also includes the missing 159 Eval3
+points. See the [complete 700-point download guide](../math_eval_matrix_20260916_h100_completion/RAW_TRAJECTORIES.md)
+for the additional archive and unified index. The three archives and manifest
+described below remain the original 541-point subset.
+
 The original completed evaluation trajectories are available as
 [GitHub Release assets](https://github.com/Jiahao-Zhangg/maxrl/releases/tag/math-eval-matrix-20260916-raw-541),
 separately from Git history. This is the same **partial** snapshot as the result

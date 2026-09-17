@@ -1,5 +1,7 @@
 # Five-model math evaluation — 2026-09-16 snapshot
 
+**700/700 completion:** [results and figures](../math_eval_matrix_20260916_h100_completion/README.md) and [all raw trajectories](../math_eval_matrix_20260916_h100_completion/RAW_TRAJECTORIES.md) are now available. This directory retains the original 541-point metrics and receipts.
+
 **Partial run: 541 of 700 budget/seed points completed.** The 48-hour holder
 expired on 2026-09-16 at 06:41 CDT (11:41 UTC). The evaluation was interrupted by
 the allocation time limit, not an out-of-memory failure. Completed results are

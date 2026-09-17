@@ -4,10 +4,14 @@
 snapshots, the complete budget grid, and decoding/grading settings. A full run has
 60 model/dataset/protocol groups and 700 individual budget/seed points.
 
-The [2026-09-16 result snapshot](../docs/evaluation_results/math_eval_matrix_20260916/README.md)
-contains complete Eval1/Eval2 results and partial Eval3 results, stopped by the
-holder's time limit. It includes tables, figures, per-seed metrics, and input/source
-provenance, but no raw rollouts, benchmark data, model weights, or local paths.
+The [completed result snapshot](../docs/evaluation_results/math_eval_matrix_20260916_h100_completion/README.md)
+contains **700/700 points**: Eval1 100/100, Eval2 300/300, and Eval3 300/300.
+It combines the original 541 GH200 points with 159 audited H100 continuation
+points. Tables, figures with macro averages, per-seed metrics, and both source
+manifests are included. [All 700 raw trajectory points](../docs/evaluation_results/math_eval_matrix_20260916_h100_completion/RAW_TRAJECTORIES.md)
+are available as GitHub Release assets; only the missing 159 points were added.
+The [original partial snapshot](../docs/evaluation_results/math_eval_matrix_20260916/README.md)
+is retained with its original metrics and receipts.
 
 - Eval1: caps 256, 512, 1024, 2048, 4096; seed 0; four independent responses per
   question. Report mean correctness across all `4 × number_of_questions` responses,
