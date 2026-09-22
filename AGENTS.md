@@ -1,5 +1,10 @@
 # Repository Guidelines
 
+## Workspace and Branch
+
+- Work in the primary `maxrl` directory on `agent/add-math12k-maxrl-launcher`.
+- Do not create or use temporary branches or sibling worktrees unless the user explicitly requests them.
+
 ## Project Structure & Module Organization
 
 Core Python code lives in `verl/`: trainers and Hydra-style YAML configuration are under `verl/trainer/`, distributed actors and rollout backends are under `verl/workers/`, and shared data, checkpoint, and metric helpers are under `verl/utils/`. Tests mirror these namespaces in `tests/`. Reusable training variants live in `recipe/`, while `examples/` contains preprocessing and launcher examples. Paper-specific entry points are grouped in `maze/`, `smollm/`, `imagenet/`, and `qwen3_experiments/`. Documentation, deployment helpers, and installation scripts live in `docs/`, `docker/`, and `scripts/`.
