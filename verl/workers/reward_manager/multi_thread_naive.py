@@ -3,18 +3,22 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import List, Dict, Any, Tuple, Set, Optional
-import time
 import signal
+import time
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import ray
 import torch
 from math_verify import verify
 
 from verl import DataProto
-from verl.workers.reward_manager import register
 from verl.utils.reward_score.math_verify import extract_solution
+from verl.utils.reward_score.thinking_efficiency import (
+    analyze_thinking_efficiency,
+    gate_correctness_reward,
+)
+from verl.workers.reward_manager import register
 
 # -----------------------------------------------------------------------------
 # math_verify imports
@@ -60,9 +64,11 @@ class MathVerifyScorer:
         # math_metric expects boxed GT
         gt_boxed = f"\\boxed{{{ground_truth_unboxed}}}"
 
-        # hard per-item timeout
-        signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(per_item_timeout_s)
+        # Zero disables our outer deadline, matching the ER verifier wrapper.
+        # MathVerify keeps its own internal parsing/equivalence timeouts.
+        if per_item_timeout_s > 0:
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(per_item_timeout_s)
         try:
             score, _ = self._verify_func([gt_boxed], [model_output])
             return float(score)
@@ -73,7 +79,8 @@ class MathVerifyScorer:
         except Exception:
             return 0.0
         finally:
-            signal.alarm(0)
+            if per_item_timeout_s > 0:
+                signal.alarm(0)
 
 
 # =============================================================================
@@ -166,6 +173,16 @@ def get_num_reward_actors(
 # Reward Manager
 # =============================================================================
 
+def response_after_thinking(text: str) -> Optional[str]:
+    """Qwen's opening <think> can be in the prompt; require a generated close."""
+    if "</think>" not in text:
+        return None
+    answer = text.rsplit("</think>", 1)[1].strip()
+    if not answer or "<think>" in answer:
+        return None
+    return answer
+
+
 @register("multi_thread")
 class MultiThreadNaiveRewardManager:
     def __init__(
@@ -183,6 +200,9 @@ class MultiThreadNaiveRewardManager:
         timeout_score: float = 0.0,
         zero_reward_on_max_response_length: bool = False,
         max_resp_len: Optional[int] = None,
+        post_think_pre_box_token_limit: Optional[int] = None,
+        check_eos: bool = False,
+        score_after_thinking: bool = False,
     ):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -192,11 +212,31 @@ class MultiThreadNaiveRewardManager:
         self._timeout_score = float(timeout_score)
         self._per_item_timeout_s = int(per_item_timeout_s)
         self._per_batch_timeout_s = float(per_batch_timeout_s)
+        if self._per_item_timeout_s < 0 or self._per_batch_timeout_s < 0:
+            raise ValueError("Reward timeouts must be nonnegative; use 0 to disable the outer deadlines")
         self._poll_interval_s = float(poll_interval_s)
         if isinstance(zero_reward_on_max_response_length, str):
             zero_reward_on_max_response_length = zero_reward_on_max_response_length.lower() in ("1", "true", "yes", "y")
         self._zero_reward_on_max_response_length = bool(zero_reward_on_max_response_length)
         self._max_resp_len = int(max_resp_len) if max_resp_len is not None else None
+        if isinstance(check_eos, str):
+            check_eos = check_eos.lower() in ("1", "true", "yes", "y")
+        if isinstance(score_after_thinking, str):
+            score_after_thinking = score_after_thinking.lower() in ("1", "true", "yes", "y")
+        self._check_eos = bool(check_eos)
+        self._score_after_thinking = bool(score_after_thinking)
+        self._eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if self._check_eos and self._eos_token_id is None:
+            raise ValueError("check_eos requires tokenizer.eos_token_id")
+        if post_think_pre_box_token_limit is None:
+            self._post_think_pre_box_token_limit = None
+        else:
+            if isinstance(post_think_pre_box_token_limit, bool):
+                raise ValueError("post_think_pre_box_token_limit must be a positive integer")
+            token_limit = int(post_think_pre_box_token_limit)
+            if token_limit <= 0 or token_limit != post_think_pre_box_token_limit:
+                raise ValueError("post_think_pre_box_token_limit must be a positive integer")
+            self._post_think_pre_box_token_limit = token_limit
 
         if isinstance(num_reward_actors, int):
             self.num_reward_actors = num_reward_actors
@@ -324,11 +364,26 @@ class MultiThreadNaiveRewardManager:
         return ans.strip()
 
     def __call__(self, data: DataProto, return_dict: bool = False):
+        missing_eos = None
+        if self._check_eos:
+            responses = data.batch["responses"]
+            response_attention_mask = data.batch["attention_mask"][:, -responses.shape[-1]:].bool()
+            # Match ER's contains-EOS check, excluding prompt and padding tokens.
+            missing_eos = ~(responses.eq(self._eos_token_id) & response_attention_mask).any(dim=-1)
+
         # preserve shortcut behavior
         if "rm_scores" in data.batch.keys():
+            if self._score_after_thinking:
+                raise ValueError("Precomputed rm_scores cannot guarantee after-thinking-only grading")
+            reward_tensor = data.batch["rm_scores"]
+            if missing_eos is not None:
+                reward_tensor = reward_tensor.masked_fill(missing_eos.unsqueeze(-1), 0.0)
             if return_dict:
-                return {"reward_tensor": data.batch["rm_scores"]}
-            return data.batch["rm_scores"]
+                result = {"reward_tensor": reward_tensor}
+                if missing_eos is not None:
+                    result["reward_extra_info"] = {"zeroed_by_missing_eos": missing_eos.float().tolist()}
+                return result
+            return reward_tensor
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info: Dict[str, list] = defaultdict(list)
@@ -365,6 +420,15 @@ class MultiThreadNaiveRewardManager:
 
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_resp_ids, skip_special_tokens=True)
+            thinking_efficiency = None
+            if self._post_think_pre_box_token_limit is not None:
+                thinking_efficiency = analyze_thinking_efficiency(
+                    token_ids=valid_resp_ids.tolist(),
+                    tokenizer=self.tokenizer,
+                )
+            scoring_response = response_after_thinking(response_str) if self._score_after_thinking else response_str
+            invalid_thinking = scoring_response is None
+            no_eos = bool(missing_eos[i].item()) if missing_eos is not None else False
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
@@ -374,11 +438,16 @@ class MultiThreadNaiveRewardManager:
                 dict(
                     i=i,
                     response=response_str,
+                    scoring_response=scoring_response,
+                    invalid_thinking=invalid_thinking,
+                    missing_eos=no_eos,
+                    invalid_response=invalid_thinking or no_eos or valid_resp_len.item() == 0,
                     ground_truth=ground_truth,
                     data_source=data_source,
                     prompt_key=prompt_key,
                     prompt_str=prompt_str,
                     valid_resp_len=valid_resp_len,
+                    thinking_efficiency=thinking_efficiency,
                 )
             )
 
@@ -386,7 +455,9 @@ class MultiThreadNaiveRewardManager:
         pending: Set[ray.ObjectRef] = set()
         start_time: Dict[ray.ObjectRef, float] = {}
         ref_to_batch: Dict[ray.ObjectRef, List[int]] = {}
-        results: Dict[int, Dict[str, float]] = {}
+        results: Dict[int, Dict[str, float]] = {
+            i: {"score": 0.0, "accuracy": 0.0} for i, info in enumerate(items) if info["invalid_response"]
+        }
 
         next_i = 0
 
@@ -397,10 +468,13 @@ class MultiThreadNaiveRewardManager:
 
             batch: List[int] = []
             while next_i < n and len(batch) < self._batch_size:
-                batch.append(next_i)
+                if not items[next_i]["invalid_response"]:
+                    batch.append(next_i)
                 next_i += 1
+            if not batch:
+                return
 
-            payload = [(i, items[i]["response"], items[i]["ground_truth"]) for i in batch]
+            payload = [(i, items[i]["scoring_response"], items[i]["ground_truth"]) for i in batch]
             ref = self._pick_actor().compute_scores_batch.remote(
                 payload,
                 self._timeout_score,
@@ -445,7 +519,7 @@ class MultiThreadNaiveRewardManager:
 
             # batch-level safety timeout (should be rare now)
             for ref in list(pending):
-                if now - start_time.get(ref, now) > self._per_batch_timeout_s:
+                if self._per_batch_timeout_s > 0 and now - start_time.get(ref, now) > self._per_batch_timeout_s:
                     pending.remove(ref)
                     batch = ref_to_batch.pop(ref)
                     start_time.pop(ref, None)
@@ -466,12 +540,50 @@ class MultiThreadNaiveRewardManager:
             out = results.get(i, {"score": self._timeout_score, "accuracy": 0.0})
             is_max_response_length = info["valid_resp_len"].item() >= (self._max_resp_len or data.batch["responses"].shape[-1])
             zeroed_by_max_response_length = self._zero_reward_on_max_response_length and is_max_response_length
-            if zeroed_by_max_response_length:
+            invalid_response = zeroed_by_max_response_length or info["invalid_response"]
+            if invalid_response:
                 out = {"score": 0.0, "accuracy": 0.0}
 
             if self._zero_reward_on_max_response_length:
                 reward_extra_info["zeroed_by_max_response_length"].append(float(zeroed_by_max_response_length))
-            reward_tensor[i, info["valid_resp_len"] - 1] = float(out["score"])
+            if self._check_eos:
+                reward_extra_info["zeroed_by_missing_eos"].append(float(info["missing_eos"]))
+            thinking_efficiency = info["thinking_efficiency"]
+            if thinking_efficiency is not None:
+                raw_math_accuracy = float(out["accuracy"])
+                gated_score = gate_correctness_reward(
+                    correctness=float(out["score"]),
+                    stats=thinking_efficiency,
+                    post_think_pre_box_token_limit=self._post_think_pre_box_token_limit,
+                )
+                post_think_tokens = thinking_efficiency.post_think_pre_box_tokens
+                length_gate_pass = (
+                    thinking_efficiency.has_think_open
+                    and thinking_efficiency.has_think_close
+                    and thinking_efficiency.has_box_after_think
+                    and post_think_tokens is not None
+                    and post_think_tokens < self._post_think_pre_box_token_limit
+                )
+                out = {**out, "score": gated_score}
+                reward_extra_info["raw_math_accuracy"].append(raw_math_accuracy)
+                reward_extra_info["thinking_tokens"].append(thinking_efficiency.thinking_tokens)
+                reward_extra_info["post_think_pre_box_tokens"].append(
+                    -1 if post_think_tokens is None else post_think_tokens
+                )
+                reward_extra_info["has_think_open"].append(float(thinking_efficiency.has_think_open))
+                reward_extra_info["has_think_close"].append(float(thinking_efficiency.has_think_close))
+                reward_extra_info["has_box_after_think"].append(
+                    float(thinking_efficiency.has_box_after_think)
+                )
+                reward_extra_info["thinking_span_censored"].append(
+                    float(thinking_efficiency.thinking_span_censored)
+                )
+                reward_extra_info["post_think_length_pass"].append(float(length_gate_pass))
+                reward_extra_info["gated_reward"].append(gated_score)
+            if self._score_after_thinking:
+                reward_extra_info["zeroed_by_invalid_thinking"].append(float(info["invalid_thinking"]))
+            if info["valid_resp_len"].item() > 0:
+                reward_tensor[i, info["valid_resp_len"] - 1] = float(out["score"])
 
             ds = info["data_source"]
             pk = info["prompt_key"]
@@ -491,13 +603,13 @@ class MultiThreadNaiveRewardManager:
                 print("[score]", out["score"])
                 print("[accuracy]", out["accuracy"])
 
-            response_str = info["response"]
+            response_str = info["scoring_response"]
 
             # Extract prediction answer
-            pred_ans = None if zeroed_by_max_response_length else self._extract_answer(response_str)
+            pred_ans = None if invalid_response else self._extract_answer(response_str)
             if pred_ans is not None:
                 prompt_to_answers[ds][pk].append(self._normalize_answer(pred_ans))
-            elif zeroed_by_max_response_length:
+            elif invalid_response:
                 prompt_to_answers[ds].setdefault(pk, [])
 
             # Extract & store GT answer once per prompt

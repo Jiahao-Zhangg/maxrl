@@ -1,0 +1,91 @@
+{
+  "all_completed_artifact_checksums_verified_for_publication": true,
+  "all_completed_points_ledger_audited": true,
+  "allocation_end_utc": "2026-09-16T11:41:31+00:00",
+  "allocation_stop_reason": "TIMEOUT",
+  "completed_points": 541,
+  "eval2_token_accounting": {
+    "allocated": 364024320,
+    "early_stop_enabled": true,
+    "early_stopped_question_instances": 53152,
+    "saved": 159731804,
+    "saved_fraction": 0.4387943201157549,
+    "used": 204292516
+  },
+  "last_completed_point_utc": "2026-09-16T11:40:32.718435+00:00",
+  "manifest_fingerprint": "32cb7610866d552c053135cfb3f330fd677a2fdf2e7827e837a5f0553bfbfb4b",
+  "protocol_progress": {
+    "eval1": {
+      "completed": 100,
+      "datasets": {
+        "amc22_23": {
+          "completed": 25,
+          "requested": 25
+        },
+        "math500": {
+          "completed": 25,
+          "requested": 25
+        },
+        "minervamath": {
+          "completed": 25,
+          "requested": 25
+        },
+        "olympiadbench": {
+          "completed": 25,
+          "requested": 25
+        }
+      },
+      "requested": 100
+    },
+    "eval2": {
+      "completed": 300,
+      "datasets": {
+        "amc22_23": {
+          "completed": 75,
+          "requested": 75
+        },
+        "math500": {
+          "completed": 75,
+          "requested": 75
+        },
+        "minervamath": {
+          "completed": 75,
+          "requested": 75
+        },
+        "olympiadbench": {
+          "completed": 75,
+          "requested": 75
+        }
+      },
+      "requested": 300
+    },
+    "eval3": {
+      "completed": 141,
+      "datasets": {
+        "amc22_23": {
+          "completed": 75,
+          "requested": 75
+        },
+        "math500": {
+          "completed": 3,
+          "requested": 75
+        },
+        "minervamath": {
+          "completed": 63,
+          "requested": 75
+        },
+        "olympiadbench": {
+          "completed": 0,
+          "requested": 75
+        }
+      },
+      "requested": 300
+    }
+  },
+  "raw_rollouts_included": false,
+  "requested_points": 700,
+  "reused_eval1_points": 55,
+  "schema_version": 1,
+  "snapshot_date": "2026-09-16",
+  "state": "partial"
+}

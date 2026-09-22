@@ -1,0 +1,26 @@
+protocol,dataset,model,display_label,metric,slope_per_log2_token,intercept,r_squared,measured_points
+eval2,math500,fixed_n_rb_offset512,CAM - Individual Budget,mean_questions_solved,26.9,90.76666666666665,0.9489828927811615,5
+eval2,math500,f_cov_offset512,CAM - Shared Budget,mean_questions_solved,29.46666666666667,58.0,0.9693174826840255,5
+eval2,math500,l1_exact,L1,mean_questions_solved,73.26666666666668,-483.9333333333335,0.771878664711089,5
+eval2,math500,efficient_reasoning,ER,mean_questions_solved,23.5,94.23333333333335,0.9366025462247584,5
+eval2,math500,qwen3_base,Base,mean_questions_solved,45.13333333333333,-159.93333333333334,0.9431161813516388,5
+eval2,minervamath,fixed_n_rb_offset512,CAM - Individual Budget,mean_questions_solved,13.1,-40.23333333333332,0.9866928168042317,5
+eval2,minervamath,f_cov_offset512,CAM - Shared Budget,mean_questions_solved,11.4,-19.53333333333333,0.9821314613911933,5
+eval2,minervamath,l1_exact,L1,mean_questions_solved,25.53333333333333,-195.53333333333333,0.9107723829628711,5
+eval2,minervamath,efficient_reasoning,ER,mean_questions_solved,8.566666666666666,2.5,0.99850335611054,5
+eval2,minervamath,qwen3_base,Base,mean_questions_solved,18.233333333333334,-115.1,0.9777049458880116,5
+eval2,olympiadbench,fixed_n_rb_offset512,CAM - Individual Budget,mean_questions_solved,47.16666666666667,-251.63333333333338,0.9982415572812591,5
+eval2,olympiadbench,f_cov_offset512,CAM - Shared Budget,mean_questions_solved,48.36666666666666,-260.69999999999993,0.9908701995481929,5
+eval2,olympiadbench,l1_exact,L1,mean_questions_solved,72.93333333333332,-587.6666666666665,0.924799695863794,5
+eval2,olympiadbench,efficient_reasoning,ER,mean_questions_solved,41.3,-213.2333333333333,0.973895936477807,5
+eval2,olympiadbench,qwen3_base,Base,mean_questions_solved,55.733333333333334,-401.6000000000001,0.9715686983212577,5
+eval2,amc22_23,fixed_n_rb_offset512,CAM - Individual Budget,mean_questions_solved,6.9333333333333345,-37.66666666666668,0.9646806992508027,5
+eval2,amc22_23,f_cov_offset512,CAM - Shared Budget,mean_questions_solved,8.433333333333334,-55.43333333333334,0.9948554553932235,5
+eval2,amc22_23,l1_exact,L1,mean_questions_solved,9.633333333333335,-75.50000000000001,0.8998944102055768,5
+eval2,amc22_23,efficient_reasoning,ER,mean_questions_solved,6.933333333333333,-45.46666666666667,0.9187123078229849,5
+eval2,amc22_23,qwen3_base,Base,mean_questions_solved,7.633333333333333,-53.7,0.9699082636679738,5
+eval2,macro_average,fixed_n_rb_offset512,CAM - Individual Budget,mean_accuracy,0.06386902971459936,-0.19838545472691949,0.9819545030428504,5
+eval2,macro_average,f_cov_offset512,CAM - Shared Budget,mean_accuracy,0.06855303919465608,-0.25262011591487255,0.9889043386381683,5
+eval2,macro_average,l1_exact,L1,mean_accuracy,0.11616995818848792,-0.8670716927230652,0.8719078904038916,5
+eval2,macro_average,efficient_reasoning,ER,mean_accuracy,0.05582629974427296,-0.16662581307075047,0.9582887850730378,5
+eval2,macro_average,qwen3_base,Base,mean_accuracy,0.08298981435429272,-0.49646552012728873,0.9680607933764465,5

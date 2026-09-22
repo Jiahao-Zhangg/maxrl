@@ -1,0 +1,9 @@
+# CUDA-enabled PyTorch stack for NVIDIA GH200.
+# The dedicated index prevents pip from selecting CPU-only aarch64 wheels from
+# PyPI when the public and CUDA wheels use the same package version.
+
+--index-url https://download.pytorch.org/whl/cu126
+
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0

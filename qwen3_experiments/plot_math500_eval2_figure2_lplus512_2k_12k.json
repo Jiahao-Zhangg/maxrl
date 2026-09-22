@@ -1,0 +1,229 @@
+{
+  "reference": "https://arxiv.org/pdf/2503.04697 (v2, Figure 2)",
+  "output_dir": "outputs/figures/math500_eval2_individual_budget_2048_12288_lplus512",
+  "output_stem": "math500_eval2_individual_budget_2048_12288_lplus512",
+  "budgets": [
+    2048,
+    4096,
+    8192,
+    12288
+  ],
+  "num_prompts": 500,
+  "rollout_cap": 4096,
+  "models": [
+    {
+      "id": "l1",
+      "label": "L1",
+      "model_key": "l1_exact_mathverify_random100to4000_seed42_step300",
+      "training_step": 300,
+      "result_dir": "outputs/eval_math500_total_budget_12288/results",
+      "group": "Baselines:",
+      "color": "#984ea3",
+      "marker": "*",
+      "marker_size": 36,
+      "marker_edgecolor": "#984ea3",
+      "marker_edgewidth": 0.6
+    },
+    {
+      "id": "er",
+      "label": "ER",
+      "model_key": "efficient_reasoning_step150",
+      "training_step": 150,
+      "result_dir": "outputs/eval_math500_total_budget_12288/results",
+      "group": "Baselines:",
+      "color": "#377eb8",
+      "marker": "^",
+      "marker_size": 30,
+      "marker_edgecolor": "#377eb8",
+      "marker_edgewidth": 0.6
+    },
+    {
+      "id": "base",
+      "label": "Base",
+      "model_key": "qwen3_base",
+      "training_step": null,
+      "result_dir": "outputs/eval_math500_total_budget_12288/results",
+      "group": "Baselines:",
+      "color": "#ff7f00",
+      "marker": "D",
+      "marker_size": 30,
+      "marker_edgecolor": "#ff7f00",
+      "marker_edgewidth": 0.6
+    },
+    {
+      "id": "maxrl",
+      "label": "MaxRL",
+      "model_key": "maxrl_step150",
+      "training_step": 150,
+      "result_dir": "outputs/eval_math500_total_budget_12288/results",
+      "group": "Baselines:",
+      "color": "#4daf4a",
+      "marker": "s",
+      "marker_size": 30,
+      "marker_edgecolor": "#4daf4a",
+      "marker_edgewidth": 0.6
+    },
+    {
+      "id": "lplus512",
+      "label": "CAM - Individual Budget",
+      "model_key": "fixed_n_rb_offset512_step150",
+      "training_step": 150,
+      "result_dir": "outputs/eval_math500_offset512_vs_cost_variants/eval2/results",
+      "group": "Our Methods:",
+      "color": "#e41a1c",
+      "marker": "o",
+      "marker_size": 30,
+      "marker_edgecolor": "black",
+      "marker_edgewidth": 0.8
+    },
+    {
+      "id": "f_cov",
+      "label": "CAM - Shared Budget",
+      "model_key": "f_cov_offset256_step150",
+      "training_step": 150,
+      "result_dir": "outputs/eval_math500_f_cov_offset256_step150/eval2/results",
+      "group": "Our Methods:",
+      "color": "#ff7f00",
+      "marker": "o",
+      "marker_size": 30,
+      "marker_edgecolor": "black",
+      "marker_edgewidth": 0.8
+    }
+  ],
+  "figure": {
+    "size_inches": [
+      10.2,
+      7.6
+    ],
+    "axes_rect": [
+      0.11,
+      0.12,
+      0.415,
+      0.8
+    ],
+    "dpi": 240,
+    "formats": [
+      "png",
+      "pdf",
+      "svg"
+    ],
+    "background": "white",
+    "title": "MATH-500",
+    "title_pad": 8,
+    "font_family": "DejaVu Sans",
+    "text_color": "#262626",
+    "title_size": 16,
+    "label_size": 15,
+    "tick_size": 14
+  },
+  "axes": {
+    "x_metric": "total_output_budget_per_prompt",
+    "y_metric": "num_prompts_solved",
+    "xscale": "log",
+    "log_base": 2,
+    "xlim": [
+      1300,
+      18500
+    ],
+    "ylim": [
+      300,
+      500
+    ],
+    "xticks": [
+      2048,
+      4096,
+      8192,
+      12288
+    ],
+    "xtick_labels": [
+      "2K",
+      "4K",
+      "8K",
+      "12K"
+    ],
+    "yticks": [
+      300,
+      325,
+      350,
+      375,
+      400,
+      425,
+      450,
+      475,
+      500
+    ],
+    "ylabel": "Number of Questions Solved",
+    "xlabel": "Individual Token Budget",
+    "label_pad": 6,
+    "spine_color": "#cccccc",
+    "spine_width": 1.5,
+    "grid_color": "#cccccc",
+    "grid_alpha": 0.6,
+    "grid_width": 0.8,
+    "grid_linestyle": "--"
+  },
+  "lines": {
+    "mode": "paper-fit",
+    "width": 1.5,
+    "alpha": 0.5,
+    "extension_factor": 1.5,
+    "extension_alpha": 0.4,
+    "extension_linestyle": "--",
+    "fit_samples": 100
+  },
+  "legend": {
+    "groups": [
+      "Our Methods:",
+      "Baselines:"
+    ],
+    "loc": "center left",
+    "bbox_to_anchor": [
+      1.08,
+      0.78
+    ],
+    "font_size": 16.8,
+    "frame": true,
+    "frame_color": "#262626",
+    "frame_width": 0.6,
+    "handle_length": 1.1,
+    "handle_text_pad": 0.6,
+    "label_spacing": 0.35,
+    "border_pad": 0.4
+  },
+  "detail": {
+    "enabled": true,
+    "budget": 12288,
+    "axes_rect": [
+      0.62,
+      0.14,
+      0.2,
+      0.32
+    ],
+    "xlim": [
+      9900,
+      15300
+    ],
+    "ylim": [
+      390,
+      452
+    ],
+    "yticks": [
+      400,
+      420,
+      440
+    ],
+    "title": "Zoomed View at 12K",
+    "title_size": 12,
+    "tick_size": 10,
+    "label_size": 9,
+    "label_offset_points": 9,
+    "left_labels": [
+      "er",
+      "base",
+      "l1"
+    ],
+    "budget_field": "total_output_budget_per_prompt",
+    "marker_size": 5,
+    "marker_edgewidth": 0.3
+  }
+}

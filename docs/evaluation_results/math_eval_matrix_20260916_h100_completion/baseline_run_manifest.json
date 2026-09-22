@@ -1,0 +1,528 @@
+{
+  "config": {
+    "datasets": [
+      {
+        "answer_field": "answer",
+        "expected_rows": 500,
+        "file": "test.jsonl",
+        "key": "math500",
+        "label": "MATH-500",
+        "question_field": "problem",
+        "repo": "HuggingFaceH4/MATH-500",
+        "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+      },
+      {
+        "answer_field": "answer",
+        "expected_rows": 272,
+        "file": "test.jsonl",
+        "key": "minervamath",
+        "label": "Minerva Math",
+        "question_field": "question",
+        "repo": "math-ai/minervamath",
+        "revision": "ee46ddc498933b1977577953250ca5c66be64f96"
+      },
+      {
+        "answer_field": "final_answer",
+        "expected_rows": 674,
+        "file": "test.parquet",
+        "key": "olympiadbench",
+        "label": "OlympiadBench",
+        "question_field": "question",
+        "repo": "math-ai/olympiadbench",
+        "revision": "4faaf1e6ec17d11a4218a9bf4c049ecaf954dd84"
+      },
+      {
+        "answer_field": "answer",
+        "expected_rows": 83,
+        "file": "data/test-00000-of-00001.parquet",
+        "key": "amc22_23",
+        "label": "AMC22+23",
+        "question_field": "problem",
+        "repo": "watermelonhjg/AMC_22_23",
+        "revision": "04d0a9e73a697d41a3d6b9d9e5044f29cdd29d03"
+      }
+    ],
+    "evals": {
+      "eval1": {
+        "budgets": [
+          256,
+          512,
+          1024,
+          2048,
+          4096
+        ],
+        "samples_per_prompt": 4,
+        "seeds": [
+          0
+        ]
+      },
+      "eval2": {
+        "budgets": [
+          512,
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seeds": [
+          0,
+          1,
+          2
+        ],
+        "stop_on_first_success": true
+      },
+      "eval3": {
+        "budgets": [
+          512,
+          1024,
+          2048,
+          4096,
+          8192
+        ],
+        "seeds": [
+          0,
+          1,
+          2
+        ]
+      }
+    },
+    "grader": {
+      "class": "verl.workers.reward_manager.multi_thread_naive.MathVerifyScorer",
+      "timeout_seconds": 1,
+      "workers": 8
+    },
+    "models": [
+      {
+        "format": "fsdp",
+        "key": "f_cov_offset512",
+        "label": "F-Cov L+512",
+        "repo": "zjhhhh/f-cov-offset512-qwen3-1.7b-base-math12k-49fbccca-step_150",
+        "revision": "d111ad8e5ac8d4448c32400625b703643ca923ee",
+        "step": 150
+      },
+      {
+        "format": "fsdp",
+        "key": "fixed_n_rb_offset512",
+        "label": "Fixed-N RB L+512",
+        "repo": "zjhhhh/fixed-n-rb-offset512-qwen3-1.7b-base-math12k-8be8236f-step_150",
+        "revision": "70df442d073f6cd17ff985d83524af137e4f089d",
+        "step": 150
+      },
+      {
+        "format": "huggingface",
+        "key": "qwen3_base",
+        "label": "Qwen3-1.7B-Base",
+        "repo": "Qwen/Qwen3-1.7B-Base",
+        "revision": "ea980cb0a6c2ae4b936e82123acc929f1cec04c1"
+      },
+      {
+        "format": "deepspeed",
+        "key": "efficient_reasoning",
+        "label": "Efficient Reasoning",
+        "repo": "zjhhhh/efficient-reasoning-qwen3-1.7b-base-math12k-step_150",
+        "revision": "4e74706114a80769ff57c5e99ed1b8398a0c28a1",
+        "step": 150
+      },
+      {
+        "format": "fsdp",
+        "key": "l1_exact",
+        "label": "L1-Exact",
+        "repo": "zjhhhh/l1-exact-mathverify-qwen3-1.7b-base-math12k-random100to4000-seed42-step_300",
+        "revision": "379de27e6d90065d22e5d57982cfb041c540772d",
+        "step": 300
+      }
+    ],
+    "prompt_suffix": "\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+    "sampling": {
+      "gpu_memory_utilization": 0.7,
+      "max_batch_size": 256,
+      "max_num_batched_tokens": 16384,
+      "max_prompt_len": 8192,
+      "per_rollout_cap": 4096,
+      "temperature": 0.6,
+      "top_k": -1,
+      "top_p": 0.95
+    },
+    "schema_version": 1
+  },
+  "datasets": {
+    "amc22_23": {
+      "num_prompts": 83,
+      "prompt_suffix": "\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+      "sha256": "4aa280ba08051babe41c9c27562b0a415f331001e2354bd5a917346bcef878b1",
+      "source_files": {
+        "data/test-00000-of-00001.parquet": {
+          "sha256": "f854313022c8fc9f4f571dd06be9ccc3541d73e1cc1f5b4f19da9879541dd287",
+          "size": 15973
+        }
+      },
+      "spec": {
+        "answer_field": "answer",
+        "expected_rows": 83,
+        "file": "data/test-00000-of-00001.parquet",
+        "key": "amc22_23",
+        "label": "AMC22+23",
+        "question_field": "problem",
+        "repo": "watermelonhjg/AMC_22_23",
+        "revision": "04d0a9e73a697d41a3d6b9d9e5044f29cdd29d03"
+      }
+    },
+    "math500": {
+      "num_prompts": 500,
+      "prompt_suffix": "\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+      "sha256": "47c600bae7f702a7640f0c21f986b9f9f93cc7c210bdb9748f23d849aef0fbe2",
+      "source_files": {
+        "test.jsonl": {
+          "sha256": "35dc41080a3680858b27fa7e0533d2d547825316fc5dafe5d316f4ccc5a06132",
+          "size": 446564
+        }
+      },
+      "spec": {
+        "answer_field": "answer",
+        "expected_rows": 500,
+        "file": "test.jsonl",
+        "key": "math500",
+        "label": "MATH-500",
+        "question_field": "problem",
+        "repo": "HuggingFaceH4/MATH-500",
+        "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+      }
+    },
+    "minervamath": {
+      "num_prompts": 272,
+      "prompt_suffix": "\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+      "sha256": "580138b14899bebb1d9937d1ef3ab8bba1d7e4548f46362b8e3e98f3b471c7ee",
+      "source_files": {
+        "test.jsonl": {
+          "sha256": "e04ec2bc1d8f80a0091b4b1989f1ffb366f3583f5bae381546a066d4ccc26e3d",
+          "size": 130303
+        }
+      },
+      "spec": {
+        "answer_field": "answer",
+        "expected_rows": 272,
+        "file": "test.jsonl",
+        "key": "minervamath",
+        "label": "Minerva Math",
+        "question_field": "question",
+        "repo": "math-ai/minervamath",
+        "revision": "ee46ddc498933b1977577953250ca5c66be64f96"
+      }
+    },
+    "olympiadbench": {
+      "num_prompts": 674,
+      "prompt_suffix": "\nPlease reason step by step, and put your final answer within \\boxed{{}}.",
+      "sha256": "a32d5fc374f9f13c873949c8638e304d2df08f7bed8569f3262f19809fde2dcd",
+      "source_files": {
+        "test.parquet": {
+          "sha256": "0d6dd8ef573dab3510ada86d2e050e7efe30768b27f3b92609753947462a85b6",
+          "size": 712418
+        }
+      },
+      "spec": {
+        "answer_field": "final_answer",
+        "expected_rows": 674,
+        "file": "test.parquet",
+        "key": "olympiadbench",
+        "label": "OlympiadBench",
+        "question_field": "question",
+        "repo": "math-ai/olympiadbench",
+        "revision": "4faaf1e6ec17d11a4218a9bf4c049ecaf954dd84"
+      }
+    }
+  },
+  "fingerprint": "32cb7610866d552c053135cfb3f330fd677a2fdf2e7827e837a5f0553bfbfb4b",
+  "models": {
+    "efficient_reasoning": {
+      "chat_template_sha256": "3bd74c5f0a7abbccbbbed03dd91e5d25a2288e506d558e721d0fe60782bcf781",
+      "files_sha256": {
+        "config.json": "1bb33a92c3548fbc68b889b490e810440435253598835bd71dff0396060c12db",
+        "generation_config.json": "8c970692323e3ea0e9b8b0a4dca79388d31226e41f83c9fd6014804280ebf6e8",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors": "be0afc48523538d2029d1bdfd491bbb9a18502f2412060a8f726dda0d602fc80",
+        "tokenizer.json": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+        "tokenizer_config.json": "3c04ed3ca964ea2f6b2b5faf0dc4d31aec1cb1e8b4bcf63f402d295046b422b5",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source_files": {
+        "global_step150/mp_rank_00_model_states.pt": {
+          "sha256": "28c47f4d48d15437fe954fa2b315cca84a63647e1d6503b3dcc00d15c43b38e1",
+          "size": 3441239736
+        },
+        "train_config.json": {
+          "sha256": "cfcdc7cbd1e3fea0654232d0753613b51413d3849a82d8d81d5baba889055c05",
+          "size": 3255
+        }
+      },
+      "spec": {
+        "format": "deepspeed",
+        "key": "efficient_reasoning",
+        "label": "Efficient Reasoning",
+        "repo": "zjhhhh/efficient-reasoning-qwen3-1.7b-base-math12k-step_150",
+        "revision": "4e74706114a80769ff57c5e99ed1b8398a0c28a1",
+        "step": 150
+      },
+      "tensor_count": 311,
+      "tensor_inventory_sha256": "5d68e9b1393658e21593c5dbcbbdef662b09e6be618243177d7160f6b3995238",
+      "vocab_sha256": "c605f1c0a80a9501fca9782b942a7f01474e3f37b1c59e3efea82da0e2f20376"
+    },
+    "f_cov_offset512": {
+      "chat_template_sha256": "3bd74c5f0a7abbccbbbed03dd91e5d25a2288e506d558e721d0fe60782bcf781",
+      "files_sha256": {
+        "added_tokens.json": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+        "config.json": "6d4c82faf6b80661bc32442713e37f99dfab59ac7935cbc1e15b22f0f1c447d2",
+        "generation_config.json": "28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors": "5c525ac829f455bacac2703a54a591cd76b6e96b830d7be308277d7ec433aefe",
+        "special_tokens_map.json": "6676f091c8bc4d1b50146427cfde92073402866b87b6e39223227931b70083e9",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "9a3a6f623ddaad552d27957966270df1c7c6b8777ddaebeb4753abd4ed635edd",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source_files": {
+        "global_step_150/actor/added_tokens.json": {
+          "sha256": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+          "size": 707
+        },
+        "global_step_150/actor/config.json": {
+          "sha256": "319862f8e7622e1280cbde1f6e64df315d258558ba880fe90916fb4981337b64",
+          "size": 766
+        },
+        "global_step_150/actor/generation_config.json": {
+          "sha256": "28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb",
+          "size": 117
+        },
+        "global_step_150/actor/merges.txt": {
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+          "size": 1671853
+        },
+        "global_step_150/actor/model_world_size_4_rank_0.pt": {
+          "sha256": "6240cb4bdb29faa69fdcc33f952519482e1280c8ca5b98e044441c7bf238a578",
+          "size": 2031961530
+        },
+        "global_step_150/actor/model_world_size_4_rank_1.pt": {
+          "sha256": "2136e1555b5aca43414bd1556fd1d483116055bad39b74f2c5cef2b571c0b41c",
+          "size": 2031961530
+        },
+        "global_step_150/actor/model_world_size_4_rank_2.pt": {
+          "sha256": "c310a29dd4b21970cda1fd56559383bb075e500e6e95cfd9594b2e97e65b28dc",
+          "size": 2031961530
+        },
+        "global_step_150/actor/model_world_size_4_rank_3.pt": {
+          "sha256": "0337cb3d132bcbc067543fc75871888edda22d5abcd99238c1f2c919e81286f8",
+          "size": 2031961530
+        },
+        "global_step_150/actor/special_tokens_map.json": {
+          "sha256": "6676f091c8bc4d1b50146427cfde92073402866b87b6e39223227931b70083e9",
+          "size": 616
+        },
+        "global_step_150/actor/tokenizer.json": {
+          "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "size": 11422654
+        },
+        "global_step_150/actor/tokenizer_config.json": {
+          "sha256": "9a3a6f623ddaad552d27957966270df1c7c6b8777ddaebeb4753abd4ed635edd",
+          "size": 9709
+        },
+        "global_step_150/actor/vocab.json": {
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      },
+      "spec": {
+        "format": "fsdp",
+        "key": "f_cov_offset512",
+        "label": "F-Cov L+512",
+        "repo": "zjhhhh/f-cov-offset512-qwen3-1.7b-base-math12k-49fbccca-step_150",
+        "revision": "d111ad8e5ac8d4448c32400625b703643ca923ee",
+        "step": 150
+      },
+      "tensor_count": 311,
+      "tensor_inventory_sha256": "5d68e9b1393658e21593c5dbcbbdef662b09e6be618243177d7160f6b3995238",
+      "vocab_sha256": "c605f1c0a80a9501fca9782b942a7f01474e3f37b1c59e3efea82da0e2f20376"
+    },
+    "fixed_n_rb_offset512": {
+      "chat_template_sha256": "3bd74c5f0a7abbccbbbed03dd91e5d25a2288e506d558e721d0fe60782bcf781",
+      "files_sha256": {
+        "added_tokens.json": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+        "config.json": "6d4c82faf6b80661bc32442713e37f99dfab59ac7935cbc1e15b22f0f1c447d2",
+        "generation_config.json": "28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors": "240bd8a979a853e9d976236a7cf2fdcc8f7da2fb1d1e1010257d688ac26af023",
+        "special_tokens_map.json": "6676f091c8bc4d1b50146427cfde92073402866b87b6e39223227931b70083e9",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "9a3a6f623ddaad552d27957966270df1c7c6b8777ddaebeb4753abd4ed635edd",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source_files": {
+        "global_step_150/actor/added_tokens.json": {
+          "sha256": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+          "size": 707
+        },
+        "global_step_150/actor/config.json": {
+          "sha256": "319862f8e7622e1280cbde1f6e64df315d258558ba880fe90916fb4981337b64",
+          "size": 766
+        },
+        "global_step_150/actor/generation_config.json": {
+          "sha256": "28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb",
+          "size": 117
+        },
+        "global_step_150/actor/merges.txt": {
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+          "size": 1671853
+        },
+        "global_step_150/actor/model_world_size_4_rank_0.pt": {
+          "sha256": "1caa931201f291afcd6d5a546ef0bc815a9dabcb0757374a7731d7c76de94c1c",
+          "size": 2031961530
+        },
+        "global_step_150/actor/model_world_size_4_rank_1.pt": {
+          "sha256": "bffb2f8b88bb1f2f9ef7d9bbd36e307d9400c0a4d56d273a7d4f6b97c7264682",
+          "size": 2031961530
+        },
+        "global_step_150/actor/model_world_size_4_rank_2.pt": {
+          "sha256": "f6c94b9b60a00c2c8665131cbd1950045c7dd6ffb543d78adf70bfcba4abf5e3",
+          "size": 2031961530
+        },
+        "global_step_150/actor/model_world_size_4_rank_3.pt": {
+          "sha256": "a3fc93061faf31722b3405e5e5a5a146c8d0869191b57cdaae6e8345cf3e75dc",
+          "size": 2031961530
+        },
+        "global_step_150/actor/special_tokens_map.json": {
+          "sha256": "6676f091c8bc4d1b50146427cfde92073402866b87b6e39223227931b70083e9",
+          "size": 616
+        },
+        "global_step_150/actor/tokenizer.json": {
+          "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+          "size": 11422654
+        },
+        "global_step_150/actor/tokenizer_config.json": {
+          "sha256": "9a3a6f623ddaad552d27957966270df1c7c6b8777ddaebeb4753abd4ed635edd",
+          "size": 9709
+        },
+        "global_step_150/actor/vocab.json": {
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      },
+      "spec": {
+        "format": "fsdp",
+        "key": "fixed_n_rb_offset512",
+        "label": "Fixed-N RB L+512",
+        "repo": "zjhhhh/fixed-n-rb-offset512-qwen3-1.7b-base-math12k-8be8236f-step_150",
+        "revision": "70df442d073f6cd17ff985d83524af137e4f089d",
+        "step": 150
+      },
+      "tensor_count": 311,
+      "tensor_inventory_sha256": "5d68e9b1393658e21593c5dbcbbdef662b09e6be618243177d7160f6b3995238",
+      "vocab_sha256": "c605f1c0a80a9501fca9782b942a7f01474e3f37b1c59e3efea82da0e2f20376"
+    },
+    "l1_exact": {
+      "chat_template_sha256": "3bd74c5f0a7abbccbbbed03dd91e5d25a2288e506d558e721d0fe60782bcf781",
+      "files_sha256": {
+        "added_tokens.json": "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680",
+        "config.json": "b039c7f83deeeecd44e23b70bafc37167a62b122d435bb1e43accd84ec088205",
+        "generation_config.json": "28396d421a2108acce96383f6a7de78008f7f1b17f807958f3c14c51dbfb65fb",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors": "8884dc87ee8306ac546035b32b92e0cb4365ac3aa6b0dbb052b1c14a92b2392d",
+        "special_tokens_map.json": "6676f091c8bc4d1b50146427cfde92073402866b87b6e39223227931b70083e9",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "9a3a6f623ddaad552d27957966270df1c7c6b8777ddaebeb4753abd4ed635edd",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source_files": {
+        "global_step_300/actor/model_world_size_4_rank_0.pt": {
+          "sha256": "14c570d021bda36933396b8720f92c1faff8b5faa7ed51f789b4d5e147a014c6",
+          "size": 2031920378
+        },
+        "global_step_300/actor/model_world_size_4_rank_1.pt": {
+          "sha256": "b67fc66544bb27c0b8626ca32463848ad227c7cac7a228d505532e3a63ceb6bb",
+          "size": 2031920378
+        },
+        "global_step_300/actor/model_world_size_4_rank_2.pt": {
+          "sha256": "2f9f81ff23cc2881b279c4ff97416ab42f6db3a72852767839127a1b40d6272b",
+          "size": 2031920378
+        },
+        "global_step_300/actor/model_world_size_4_rank_3.pt": {
+          "sha256": "0cfbf58b29fd9c6470b5fbff761ba94a39f5bcc5b7aa5c972e1897945efe788c",
+          "size": 2031920378
+        }
+      },
+      "spec": {
+        "format": "fsdp",
+        "key": "l1_exact",
+        "label": "L1-Exact",
+        "repo": "zjhhhh/l1-exact-mathverify-qwen3-1.7b-base-math12k-random100to4000-seed42-step_300",
+        "revision": "379de27e6d90065d22e5d57982cfb041c540772d",
+        "step": 300
+      },
+      "tensor_count": 311,
+      "tensor_inventory_sha256": "5d68e9b1393658e21593c5dbcbbdef662b09e6be618243177d7160f6b3995238",
+      "vocab_sha256": "c605f1c0a80a9501fca9782b942a7f01474e3f37b1c59e3efea82da0e2f20376"
+    },
+    "qwen3_base": {
+      "chat_template_sha256": "3bd74c5f0a7abbccbbbed03dd91e5d25a2288e506d558e721d0fe60782bcf781",
+      "files_sha256": {
+        "config.json": "1bb33a92c3548fbc68b889b490e810440435253598835bd71dff0396060c12db",
+        "generation_config.json": "8c970692323e3ea0e9b8b0a4dca79388d31226e41f83c9fd6014804280ebf6e8",
+        "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+        "model.safetensors": "6df85b39330e5a425ee36253d0f894e4387e4f0a15b9c53cb467d668e6b3a841",
+        "tokenizer.json": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+        "tokenizer_config.json": "3c04ed3ca964ea2f6b2b5faf0dc4d31aec1cb1e8b4bcf63f402d295046b422b5",
+        "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      },
+      "source_files": {
+        "config.json": {
+          "sha256": "1bb33a92c3548fbc68b889b490e810440435253598835bd71dff0396060c12db",
+          "size": 727
+        },
+        "generation_config.json": {
+          "sha256": "8c970692323e3ea0e9b8b0a4dca79388d31226e41f83c9fd6014804280ebf6e8",
+          "size": 138
+        },
+        "merges.txt": {
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+          "size": 1671853
+        },
+        "model.safetensors": {
+          "sha256": "6df85b39330e5a425ee36253d0f894e4387e4f0a15b9c53cb467d668e6b3a841",
+          "size": 3441185608
+        },
+        "tokenizer.json": {
+          "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+          "size": 7031645
+        },
+        "tokenizer_config.json": {
+          "sha256": "3c04ed3ca964ea2f6b2b5faf0dc4d31aec1cb1e8b4bcf63f402d295046b422b5",
+          "size": 9678
+        },
+        "vocab.json": {
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "size": 2776833
+        }
+      },
+      "spec": {
+        "format": "huggingface",
+        "key": "qwen3_base",
+        "label": "Qwen3-1.7B-Base",
+        "repo": "Qwen/Qwen3-1.7B-Base",
+        "revision": "ea980cb0a6c2ae4b936e82123acc929f1cec04c1"
+      },
+      "tensor_count": 310,
+      "tensor_inventory_sha256": "ff9cfc5996d1fd9667d445f46dfe4fbb5ea2a0c10df75e92c937cb9778115565",
+      "vocab_sha256": "c605f1c0a80a9501fca9782b942a7f01474e3f37b1c59e3efea82da0e2f20376"
+    }
+  },
+  "packages": {
+    "datasets": "3.5.0",
+    "math-verify": "0.9.0",
+    "torch": "2.6.0+cu126",
+    "transformers": "4.51.3",
+    "vllm": "0.8.4+cu126"
+  },
+  "source_sha256": {
+    "qwen3_experiments/math_eval_budget_engine.py": "ebaaa7a5febabceefe407fd9f0fee50f8a4a00610014eaa00041a42044b1b1b9",
+    "qwen3_experiments/math_eval_matrix_common.py": "f4da13f778a525a8e206b39702aa972baf98c8cc8fb3a3f4eaf632aca29362a3",
+    "qwen3_experiments/run_math_eval_matrix.py": "d808c1861c387c888c29f9e93ff1700155743495263eb6a1bf77dca45b10b353",
+    "verl/workers/reward_manager/multi_thread_naive.py": "8ab57033fe0a495c1eaf75c578c95d5dbe60e795ab83ae7265b9c25c8c7897c4"
+  }
+}

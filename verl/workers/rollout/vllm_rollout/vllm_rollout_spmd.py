@@ -88,6 +88,8 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
+        if config.get("force_eos", False) and config.calculate_log_probs:
+            raise ValueError("force_eos requires calculate_log_probs=false; recompute log probabilities with the actor")
         assert not (not config.enforce_eager and config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
@@ -300,6 +302,17 @@ class vLLMRollout(BaseRollout):
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
+                    if self.config.get("force_eos", False):
+                        # Match ER with micro_rollout_batch_size=1: overwrite the
+                        # final generated token, including when the length cap
+                        # was hit. Do this before padding, masks, and actor log
+                        # probabilities so the complete training batch agrees.
+                        response_ids = list(response_ids)
+                        terminal_eos = eos_token_id[0] if isinstance(eos_token_id, list) else eos_token_id
+                        if response_ids:
+                            response_ids[-1] = terminal_eos
+                        else:
+                            response_ids = [terminal_eos]
                     response.append(response_ids)
                     # Collect finish_reason: "stop" means EOS, "length" means max length reached
                     finish_reasons.append(output.outputs[sample_id].finish_reason)
