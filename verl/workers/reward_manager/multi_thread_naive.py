@@ -173,6 +173,16 @@ def get_num_reward_actors(
 # Reward Manager
 # =============================================================================
 
+def response_after_thinking(text: str) -> Optional[str]:
+    """Qwen's opening <think> can be in the prompt; require a generated close."""
+    if "</think>" not in text:
+        return None
+    answer = text.rsplit("</think>", 1)[1].strip()
+    if not answer or "<think>" in answer:
+        return None
+    return answer
+
+
 @register("multi_thread")
 class MultiThreadNaiveRewardManager:
     def __init__(
@@ -192,6 +202,7 @@ class MultiThreadNaiveRewardManager:
         max_resp_len: Optional[int] = None,
         post_think_pre_box_token_limit: Optional[int] = None,
         check_eos: bool = False,
+        score_after_thinking: bool = False,
     ):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
@@ -210,7 +221,10 @@ class MultiThreadNaiveRewardManager:
         self._max_resp_len = int(max_resp_len) if max_resp_len is not None else None
         if isinstance(check_eos, str):
             check_eos = check_eos.lower() in ("1", "true", "yes", "y")
+        if isinstance(score_after_thinking, str):
+            score_after_thinking = score_after_thinking.lower() in ("1", "true", "yes", "y")
         self._check_eos = bool(check_eos)
+        self._score_after_thinking = bool(score_after_thinking)
         self._eos_token_id = getattr(tokenizer, "eos_token_id", None)
         if self._check_eos and self._eos_token_id is None:
             raise ValueError("check_eos requires tokenizer.eos_token_id")
@@ -359,6 +373,8 @@ class MultiThreadNaiveRewardManager:
 
         # preserve shortcut behavior
         if "rm_scores" in data.batch.keys():
+            if self._score_after_thinking:
+                raise ValueError("Precomputed rm_scores cannot guarantee after-thinking-only grading")
             reward_tensor = data.batch["rm_scores"]
             if missing_eos is not None:
                 reward_tensor = reward_tensor.masked_fill(missing_eos.unsqueeze(-1), 0.0)
@@ -410,6 +426,9 @@ class MultiThreadNaiveRewardManager:
                     token_ids=valid_resp_ids.tolist(),
                     tokenizer=self.tokenizer,
                 )
+            scoring_response = response_after_thinking(response_str) if self._score_after_thinking else response_str
+            invalid_thinking = scoring_response is None
+            no_eos = bool(missing_eos[i].item()) if missing_eos is not None else False
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
             data_source = data_item.non_tensor_batch[self.reward_fn_key]
@@ -419,13 +438,16 @@ class MultiThreadNaiveRewardManager:
                 dict(
                     i=i,
                     response=response_str,
+                    scoring_response=scoring_response,
+                    invalid_thinking=invalid_thinking,
+                    missing_eos=no_eos,
+                    invalid_response=invalid_thinking or no_eos or valid_resp_len.item() == 0,
                     ground_truth=ground_truth,
                     data_source=data_source,
                     prompt_key=prompt_key,
                     prompt_str=prompt_str,
                     valid_resp_len=valid_resp_len,
                     thinking_efficiency=thinking_efficiency,
-                    missing_eos=bool(missing_eos[i].item()) if missing_eos is not None else False,
                 )
             )
 
@@ -434,7 +456,7 @@ class MultiThreadNaiveRewardManager:
         start_time: Dict[ray.ObjectRef, float] = {}
         ref_to_batch: Dict[ray.ObjectRef, List[int]] = {}
         results: Dict[int, Dict[str, float]] = {
-            i: {"score": 0.0, "accuracy": 0.0} for i, info in enumerate(items) if info["missing_eos"]
+            i: {"score": 0.0, "accuracy": 0.0} for i, info in enumerate(items) if info["invalid_response"]
         }
 
         next_i = 0
@@ -446,13 +468,13 @@ class MultiThreadNaiveRewardManager:
 
             batch: List[int] = []
             while next_i < n and len(batch) < self._batch_size:
-                if not items[next_i]["missing_eos"]:
+                if not items[next_i]["invalid_response"]:
                     batch.append(next_i)
                 next_i += 1
             if not batch:
                 return
 
-            payload = [(i, items[i]["response"], items[i]["ground_truth"]) for i in batch]
+            payload = [(i, items[i]["scoring_response"], items[i]["ground_truth"]) for i in batch]
             ref = self._pick_actor().compute_scores_batch.remote(
                 payload,
                 self._timeout_score,
@@ -518,7 +540,7 @@ class MultiThreadNaiveRewardManager:
             out = results.get(i, {"score": self._timeout_score, "accuracy": 0.0})
             is_max_response_length = info["valid_resp_len"].item() >= (self._max_resp_len or data.batch["responses"].shape[-1])
             zeroed_by_max_response_length = self._zero_reward_on_max_response_length and is_max_response_length
-            invalid_response = zeroed_by_max_response_length or info["missing_eos"]
+            invalid_response = zeroed_by_max_response_length or info["invalid_response"]
             if invalid_response:
                 out = {"score": 0.0, "accuracy": 0.0}
 
@@ -558,7 +580,10 @@ class MultiThreadNaiveRewardManager:
                 )
                 reward_extra_info["post_think_length_pass"].append(float(length_gate_pass))
                 reward_extra_info["gated_reward"].append(gated_score)
-            reward_tensor[i, info["valid_resp_len"] - 1] = float(out["score"])
+            if self._score_after_thinking:
+                reward_extra_info["zeroed_by_invalid_thinking"].append(float(info["invalid_thinking"]))
+            if info["valid_resp_len"].item() > 0:
+                reward_tensor[i, info["valid_resp_len"] - 1] = float(out["score"])
 
             ds = info["data_source"]
             pk = info["prompt_key"]
@@ -578,7 +603,7 @@ class MultiThreadNaiveRewardManager:
                 print("[score]", out["score"])
                 print("[accuracy]", out["accuracy"])
 
-            response_str = info["response"]
+            response_str = info["scoring_response"]
 
             # Extract prediction answer
             pred_ans = None if invalid_response else self._extract_answer(response_str)
