@@ -1912,7 +1912,8 @@ class PPOTrainer(ABC):
                 keys=batch.keys, partition_id=batch.partition_id, select_fields=["uid", "data_source"]
             )
             scores = data["rm_scores"].sum(dim=1).tolist()
-            uids, sources = identities["uid"].tolist(), identities["data_source"].tolist()
+            # Non-tensor fields may be LinkedList objects without .tolist().
+            uids, sources = list(identities["uid"]), list(identities["data_source"])
             indices = np.flatnonzero(non_padding_mask).tolist()
             metrics.update(compute_prompt_binning(
                 [scores[i] for i in indices], [uids[i] for i in indices], [sources[i] for i in indices],
