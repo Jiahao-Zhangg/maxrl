@@ -1905,6 +1905,20 @@ class PPOTrainer(ABC):
             kv_batch_get=tq.kv_batch_get,
         )
 
+        if self.config.trainer.get("log_training_binning", False):
+            from verl.trainer.ppo.prompt_binning import compute_prompt_binning
+
+            identities = tq.kv_batch_get(
+                keys=batch.keys, partition_id=batch.partition_id, select_fields=["uid", "data_source"]
+            )
+            scores = data["rm_scores"].sum(dim=1).tolist()
+            uids, sources = identities["uid"].tolist(), identities["data_source"].tolist()
+            indices = np.flatnonzero(non_padding_mask).tolist()
+            metrics.update(compute_prompt_binning(
+                [scores[i] for i in indices], [uids[i] for i in indices], [sources[i] for i in indices],
+                expected_group_size=self.config.actor_rollout_ref.rollout.n,
+            ))
+
         num_turns = np.array(data.pop("num_turns").tolist())
         prompt_length = data["prompts"].offsets().diff()
         response_length = data["responses"].offsets().diff()

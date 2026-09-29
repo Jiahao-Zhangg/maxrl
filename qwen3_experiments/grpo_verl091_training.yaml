@@ -1,0 +1,18 @@
+# Merge over grpo_verl091_benchmark.yaml; paths come from the frozen run plan.
+trainer:
+  total_epochs: 1
+  total_training_steps: 100
+  save_freq: 10
+  test_freq: -1
+  val_before_train: false
+  logger: [console, wandb]
+  log_training_binning: true
+  resume_mode: disable
+  max_actor_ckpt_to_keep: null
+
+actor_rollout_ref:
+  actor:
+    checkpoint:
+      save_contents: [model, optimizer, extra]
+      load_contents: [model, optimizer, extra]
+      async_save: false

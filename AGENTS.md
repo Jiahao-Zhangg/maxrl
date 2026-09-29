@@ -2,8 +2,16 @@
 
 ## Workspace and Branch
 
-- Work in the primary `maxrl` directory on `agent/add-math12k-maxrl-launcher`.
+- Work in the primary `maxrl` directory. The user-requested upgrade branch is `codex/verl-0.9.1-vllm-0.24-grpo`.
 - Do not create or use temporary branches or sibling worktrees unless the user explicitly requests them.
+
+## Training and Evaluation Environment
+
+- Use `maxrl-code-verl091` for new training and evaluation: veRL 0.9.1 and vLLM 0.24.0.
+- Run controllers, training, checkpoint uploads and evaluation on the assigned compute node, using frozen runtime copies.
+- Coding GRPO defaults to the cleaned 3,200-row Nemotron/LeetCode dataset, batch 32, N=8, concurrency 16, thinking on, and 32k output tokens. Training sampling is 1/1/-1; evaluation is 0.6/0.95/20.
+- Use the shared pinned LiveCodeBench grader for coding training and evaluation, binary reward, after-thinking code only, no EOS requirement. Log Polaris-compatible training accuracy bins globally and per data source.
+- Save every 10 steps, verify public Hub uploads before deleting local checkpoints and completed rollout files, and preserve receipts for recovery.
 
 ## Hugging Face Uploads
 

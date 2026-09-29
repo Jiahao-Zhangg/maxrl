@@ -148,9 +148,11 @@ def sandbox_command(plan, payload):
     for path in ("/usr", "/lib", "/lib64", "/bin"):
         if Path(path).exists():
             command.extend(["--ro-bind", path, path])
-    command += ["--ro-bind", prefix, prefix, "--ro-bind", plan["official"], "/official",
+    # Mount the private scratch filesystem before exposing an environment that
+    # may itself live under /tmp on the compute node.
+    command += ["--tmpfs", "/tmp", "--ro-bind", prefix, prefix, "--ro-bind", plan["official"], "/official",
                 "--ro-bind", plan["sandbox_runner"], "/runner.py", "--ro-bind", str(payload), "/input.json",
-                "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev", "--clearenv"]
+                "--proc", "/proc", "--dev", "/dev", "--clearenv"]
     for key, value in {"PATH": prefix + "/bin:/usr/bin:/bin", "HOME": "/tmp", "TMPDIR": "/tmp",
                        "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "OMP_NUM_THREADS": "1",
                        "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}.items():
