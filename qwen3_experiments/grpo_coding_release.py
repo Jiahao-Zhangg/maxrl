@@ -249,7 +249,8 @@ def prepare(args):
                      "max_num_seqs": 16, "temperature": 1.0,
                      "top_p": 1.0, "top_k": -1, "shuffle": True, "seed": 42, "epochs": 1},
         "grading": {"name": "livecodebench", "check_eos": False, "score_after_thinking": True,
-                    "unit_test_timeout_seconds": 10, "binary": True, "workers": 128},
+                    "unit_test_timeout_seconds": 10, "binary": True, "workers": 128,
+                    "timeout_policy": "zero_reward_no_retry"},
     }
     if args.after_root is not None:
         predecessor_path = args.after_root.absolute() / "plan.json"

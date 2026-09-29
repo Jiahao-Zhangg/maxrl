@@ -126,9 +126,10 @@ def grade_response(grader, question, response):
     return grader(truth_for(question), code)
 
 
-def verify_response(record, question, model, plan_hash):
+def verify_response(record, question, model, plan_hash, *, compatible_plan_hashes=()):
     if (record["id"] != question["id"] or record["index"] != question["source_index"]
-            or record["model_revision"] != model["revision"] or record["plan_sha256"] != plan_hash):
+            or record["model_revision"] != model["revision"]
+            or record["plan_sha256"] not in (plan_hash, *compatible_plan_hashes)):
         raise ValueError("Saved response belongs to another question, checkpoint, or run")
 
 
@@ -151,7 +152,8 @@ def worker(plan, dataset, rank):
     def score_one(question):
         source = directory / "responses" / f"{question['source_index']}.json"
         response = read(source)
-        verify_response(response, question, model, plan_hash)
+        verify_response(response, question, model, plan_hash,
+                        compatible_plan_hashes=plan.get("compatible_response_plan_sha256", ()))
         target = directory / "grades" / source.name
         if target.exists():
             old = read(target)
@@ -167,7 +169,8 @@ def worker(plan, dataset, rank):
         for question in questions:
             path = directory / "responses" / f"{question['source_index']}.json"
             if path.exists():
-                verify_response(read(path), question, model, plan_hash)
+                verify_response(read(path), question, model, plan_hash,
+                                compatible_plan_hashes=plan.get("compatible_response_plan_sha256", ()))
                 futures.append(pool.submit(score_one, question))
             else:
                 pending.append(question)
@@ -207,7 +210,8 @@ def summarize(plan, dataset):
     for question in questions:
         source = directory / "responses" / f"{question['source_index']}.json"
         response = read(source)
-        verify_response(response, question, model, plan["plan_sha256"])
+        verify_response(response, question, model, plan["plan_sha256"],
+                        compatible_plan_hashes=plan.get("compatible_response_plan_sha256", ()))
         record = read(directory / "grades" / source.name)
         if record["id"] != question["id"] or record["response_sha256"] != digest(source):
             raise ValueError("Grade/response mismatch")
@@ -223,6 +227,7 @@ def summarize(plan, dataset):
     result = {**metrics(records), "grader": "livecodebench", "grader_revision": LCB_REVISION,
               "unit_test_timeout_seconds": 10, "vllm": "0.24.0", "check_eos": False,
               "score_after_thinking": True, "model_revision": model["revision"],
+              "grading_timeout_policy": "zero_reward_no_retry",
               "by_difficulty": {d: metrics([r for r in records if r["difficulty"] == d])
                                 for d in sorted({r["difficulty"] for r in records})}}
     write(directory / "metrics.json", result)

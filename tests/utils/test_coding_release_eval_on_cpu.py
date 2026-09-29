@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from qwen3_experiments.coding_release_eval import holdout_truth, taco_io
+from qwen3_experiments.coding_release_eval import holdout_truth, taco_io, verify_response
 from qwen3_experiments.taco_eval import sandbox_command
 
 
@@ -35,3 +35,17 @@ def test_node_local_python_is_mounted_after_private_tmp():
     command = sandbox_command(plan, "/tmp/input.json")
     assert command.index("--tmpfs") < command.index("/tmp/example-env")
     assert "--unshare-all" in command and "--clearenv" in command
+
+
+def test_response_reuse_requires_explicit_plan_compatibility_and_same_model_question():
+    question = {"id": "question", "source_index": 7}
+    model = {"revision": "weights"}
+    record = {"id": "question", "index": 7, "model_revision": "weights", "plan_sha256": "old-policy"}
+    with pytest.raises(ValueError):
+        verify_response(record, question, model, "new-policy")
+    verify_response(record, question, model, "new-policy", compatible_plan_hashes=["old-policy"])
+    for key, value in [("id", "other-question"), ("index", 8), ("model_revision", "other-model"),
+                       ("plan_sha256", "unapproved-plan")]:
+        with pytest.raises(ValueError):
+            verify_response({**record, key: value}, question, model, "new-policy",
+                            compatible_plan_hashes=["old-policy"])

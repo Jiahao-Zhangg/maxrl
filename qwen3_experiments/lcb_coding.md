@@ -19,6 +19,10 @@ keeps the same 3,200 IDs, prompts, source metadata, and 219,771 test cases.
   = 0. Preserve LCB's fail-fast behavior. Negative error codes never count as true.
 - Every test has a **10-second** limit. For LeetCode this replaces the previous
   **10-second whole-suite** limit. The host has a separate outer watchdog.
+- Exceeding the outer grader deadline also gives reward **0**, with reason
+  `grading_timeout`, without retrying or dropping the rollout. The process group
+  is killed and reaped. `executed_tests=0` means no partial test results were
+  returned; the timeout metadata explicitly records that they are unavailable.
 - Use LCB's native output comparisons. In particular, its stdin numeric comparison
   uses exact decimal equality and is not the NeMo fork's floating-point tolerance
   or case-insensitive YES/NO extension. This is a grader-policy migration, not a

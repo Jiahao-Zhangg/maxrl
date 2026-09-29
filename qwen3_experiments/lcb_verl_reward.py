@@ -31,8 +31,8 @@ async def compute_score(
     """Grade only code after </think>, with no EOS requirement or wrong-answer retry.
 
     Eight veRL reward processes with sixteen executor threads each cap sandbox
-    concurrency at 128. Infrastructure failures propagate to the trainer after
-    the existing grader's single infrastructure retry.
+    concurrency at 128. Test and grader-process timeouts return zero without a
+    retry. Other infrastructure failures propagate after one infrastructure retry.
     """
     code, reason = final_code(solution_str)
     if reason != "ok":

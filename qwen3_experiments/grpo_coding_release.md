@@ -49,9 +49,10 @@ official `testing_util.py` at revision
 `28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24`. Both use the same Python environment
 and credential-free bubblewrap sandbox, ten seconds per test, binary reward,
 first-failure early stop, code after the last closing thinking tag, and no EOS
-requirement. A missing closing thinking tag receives zero. Infrastructure
-failures are retried once and otherwise raised, rather than recorded as wrong
-model answers.
+requirement. A missing closing thinking tag receives zero. Both per-test and
+whole-grader timeouts receive zero without a retry; the rollout stays in its
+complete prompt group. Other infrastructure failures are retried once and
+otherwise raised.
 
 After the step-100 model has been merged and publicly uploaded, the queue runs:
 
@@ -76,6 +77,10 @@ Evaluation uses vLLM 0.24.0, thinking on, 32k output tokens, 0.6/0.95/20, one
 sample per question (pass@1), original source-row-index seeds, and concurrency
 16 per GPU. Grading overlaps later generation batches. Responses and individual
 grades are resumable and checked against the model revision and frozen plan.
+An explicit `compatible_response_plan_sha256` list can retain generations from
+a prior plan after verifying the model, prompts, sampling, and test manifests
+are unchanged. Old response files remain byte-identical. This supports a
+documented timeout-policy update without regenerating completed answers.
 
 ## Supervision and storage
 

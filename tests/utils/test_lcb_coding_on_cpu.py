@@ -108,3 +108,44 @@ def test_result_codes_and_partial_success_never_become_false_rewards(tmp_path, m
             grader._run(truth, "print(1)")
     else:
         assert grader._run(truth, "print(1)")["score"] == expected
+
+
+@pytest.mark.parametrize("already_exited", [False, True])
+def test_outer_timeout_returns_zero_once_and_reaps_the_process(tmp_path, monkeypatch, already_exited):
+    import qwen3_experiments.lcb_coding_grading as module
+
+    grader = object.__new__(LiveCodeBenchGrader)
+    grader.plan, grader.temp_root = {}, tmp_path
+    processes, waits, kills = [], [], []
+
+    class Process:
+        pid = 123456
+
+        def communicate(self, timeout=None):
+            waits.append(timeout)
+            if timeout is not None:
+                raise module.subprocess.TimeoutExpired("fake-sandbox", timeout)
+            return "", ""
+
+    def launch(*args, **kwargs):
+        process = Process()
+        processes.append(process)
+        return process
+
+    def kill(pid, sig):
+        kills.append((pid, sig))
+        if already_exited:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(module, "sandbox_command", lambda *args: ["fake-sandbox"])
+    monkeypatch.setattr(module.subprocess, "Popen", launch)
+    monkeypatch.setattr(module.os, "killpg", kill)
+    truth = convert_truth({"grader": "nemo_gym_code_gen", "unit_tests": {"inputs": ["1"], "outputs": ["1"]}})
+    result = grader(truth, "print(1)")
+    assert result["score"] == 0.0 and result["reason"] == "grading_timeout"
+    assert result["results"] == [-3] and result["seconds"] >= 0
+    assert result["metadata"]["partial_results_available"] is False
+    wall = truth["unit_test_timeout_seconds"] + 31
+    assert result["metadata"]["wall_timeout_seconds"] == wall
+    assert waits == [wall, None] and len(processes) == 1
+    assert kills == [(123456, module.signal.SIGKILL)]

@@ -14,7 +14,7 @@ from qwen3_experiments.taco_eval import sandbox_command
 
 
 class GradingInfrastructureError(RuntimeError):
-    """A failed grader must not silently become a wrong model answer."""
+    """A non-timeout grader failure must not silently become a wrong answer."""
 
 
 class LiveCodeBenchGrader:
@@ -56,10 +56,18 @@ class LiveCodeBenchGrader:
                                        stderr=subprocess.PIPE, text=True, start_new_session=True)
             try:
                 stdout, stderr = process.communicate(timeout=wall)
-            except subprocess.TimeoutExpired as exc:
-                os.killpg(process.pid, signal.SIGKILL)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 process.communicate()
-                raise GradingInfrastructureError("LCB runner exceeded its outer deadline") from exc
+                # Keep timed-out rollouts in their complete prompt groups.
+                # Partial test results are unavailable after killing the runner.
+                return {"score": 0.0, "reason": "grading_timeout", "results": [-3],
+                        "total_tests": len(tests["inputs"]), "executed_tests": 0,
+                        "metadata": {"timeout_scope": "grader_process", "wall_timeout_seconds": wall,
+                                     "partial_results_available": False}}
             if process.returncode:
                 raise GradingInfrastructureError(f"LCB sandbox exit {process.returncode}: {stderr[-1500:]}")
             try:
