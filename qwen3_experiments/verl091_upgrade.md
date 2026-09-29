@@ -107,3 +107,35 @@ python -m qwen3_experiments.grpo_release_benchmark --plan "$BENCHMARK_PLAN"
 The plan must identify an idle eight-GPU allocation, frozen runtime tree, local
 model and data, pinned grading plan, and persistent artifact directory. The
 controller refuses to launch if another compute process occupies a GPU.
+
+## Measured single-step result
+
+On 2026-09-29, the controlled replay completed one full GRPO step on 8 H100
+80 GB GPUs, exited with code 0, and released all GPUs. Final rollout inputs
+match the previous baselines exactly: 32 prompts with eight responses each.
+
+| Stack | Step seconds | Generation seconds | Output tokens/s, 8 GPUs | Output tokens | Peak sampled GiB/GPU |
+|---|---:|---:|---:|---:|---:|
+| vLLM 0.8.4 / V0 + Graph | 905.579 | 631.955 | 5,506.8 | 3,480,030 | 72.38 |
+| vLLM 0.9.2 / V1 + Graph | 568.612 | 433.061 | 8,145.1 | 3,527,333 | 75.00 |
+| veRL 0.9.1 / vLLM 0.24.0 / MRV2 + Graph | 418.111 | 308.974 | 11,590.5 | 3,581,148 | 60.30 |
+
+Relative to the previous V1 stack, step time fell 26.5% and generation
+throughput rose 42.3%, with 1.53% more output tokens. The final run had no OOM
+and zero cumulative preemptions across all eight engines. It scored 92/256
+responses correct and performed an update with finite gradient norm 0.0746686.
+This reward count is a batch sanity check, not a model-quality comparison.
+
+Old-log-prob computation took 32.782 seconds, actor update 53.727 seconds,
+and end-of-step weight synchronization 1.629 seconds. Launch-to-exit time was
+618.073 seconds (previous V1: 703.062 seconds). Initial weight synchronization
+is outside the new trainer's step timer; the final synchronization is inside.
+Generation timings include the respective frameworks' orchestration overhead.
+
+Training-side entropy compilation reached the dynamic-shape recompile limit
+in the no-grad old-log-prob pass and fell back to eager. Ray teardown also
+printed a DataLoader-worker termination warning after successful step logging
+and rollout saving. These are retained in the experiment logs; no inference
+preemption or failed training update occurred in the final run. The earlier
+entropy-OOM attempt and the successful run with mismatched prompts are archived
+separately and excluded from this table.
