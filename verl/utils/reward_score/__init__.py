@@ -16,7 +16,16 @@
 from verl.utils.import_utils import deprecated
 
 
-def default_compute_score(data_source, solution_str, ground_truth, extra_info=None, sandbox_fusion_url=None, concurrent_semaphore=None):
+def default_compute_score(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info=None,
+    sandbox_fusion_url=None,
+    concurrent_semaphore=None,
+    memory_limit_mb=None,
+    **kwargs,
+):
     """Compute the score for a given solution based on the data source.
 
     Args:
@@ -31,68 +40,26 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
 
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
-    """    
-    if data_source.startswith("maze"):
-        from .maze import judge_maze
-        res = judge_maze(solution_str=solution_str, ground_truth=ground_truth)
-        return res
-    
-    elif data_source == "openai/gsm8k":
-        from . import math_verify
-        res = math_verify.compute_score(solution_str, ground_truth)
+    """
+    if data_source == "openai/gsm8k":
+        from . import gsm8k
 
-        # from . import deepmath
-        # res = deepmath.compute_score(solution_str, ground_truth)
+        res = gsm8k.compute_score(solution_str, ground_truth)
+    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "HuggingFaceH4/MATH-500"]:
+        from . import math_reward
 
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval"]:
-        # from . import math
-
-        # res = math.compute_score(solution_str, ground_truth)
+        res = math_reward.compute_score(solution_str, ground_truth)
         # [Optional] Math-Verify Integration
         # For enhanced accuracy, consider utilizing Math-Verify (https://github.com/huggingface/Math-Verify).
         # Note: Math-Verify needs to be manually installed via pip: `pip install math-verify`.
         # To use it, override the `compute_score` function with the following implementation:
 
-        from . import math_verify
-        res = math_verify.compute_score(solution_str, ground_truth)
+        # from . import math_verify
+        # res = math_verify.compute_score(solution_str, ground_truth)
+    elif data_source in ["math_dapo", "math", "math_dapo_reasoning"] or data_source.startswith("aime"):
+        from . import math_dapo
 
-        # from . import deepmath
-        # res = deepmath.compute_score(solution_str, ground_truth)
-
-    elif data_source == "countdown":
-        from . import countdown
-
-        res = countdown.compute_score(
-            solution_str=solution_str,
-            ground_truth=ground_truth,
-        )
-
-    elif (
-        data_source == "math_dapo" 
-        or data_source.startswith("aime") 
-        or data_source == "amc23"
-        or data_source.startswith("dapo")
-        or data_source.startswith("deepmath-103k")
-        or data_source == "polaris"
-        or data_source == "openr1"
-        or data_source == "minerva"
-        or data_source == "olympiadbench"
-        or data_source == "simplelr_qwen"
-        or data_source == "beyondaime"
-        or data_source == "hmmt_feb_2025"
-        or data_source == "hmmt_nov_2025"
-        or data_source == "jeebench"
-    ):
-        # from . import math_dapo
-
-        # res = math_dapo.compute_score(solution_str, ground_truth)
-
-        from . import math_verify
-        res = math_verify.compute_score(solution_str, ground_truth)
-
-        # from . import deepmath
-        # res = deepmath.compute_score(solution_str, ground_truth)
-
+        res = math_dapo.compute_score(solution_str, ground_truth)
     elif data_source in [
         "numina_aops_forum",
         "numina_synthetic_math",
@@ -110,7 +77,9 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
             from . import sandbox_fusion
 
             # Pass the URL directly, ground_truth likely contains test cases here
-            res = sandbox_fusion.compute_score(sandbox_fusion_url, concurrent_semaphore, solution_str, ground_truth, continuous=True)
+            res = sandbox_fusion.compute_score(
+                sandbox_fusion_url, concurrent_semaphore, memory_limit_mb, solution_str, ground_truth, continuous=True
+            )
         else:
             # If no sandbox URL is provided, fall back to prime_code or raise error
             from . import prime_code
@@ -121,7 +90,15 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         from . import geo3k
 
         res = geo3k.compute_score(solution_str, ground_truth)
-    elif data_source in ["searchR1_nq", "searchR1_triviaqa", "searchR1_popqa", "searchR1_hotpotqa", "searchR1_2wikimultihopqa", "searchR1_musique", "searchR1_bamboogle"]:
+    elif data_source in [
+        "searchR1_nq",
+        "searchR1_triviaqa",
+        "searchR1_popqa",
+        "searchR1_hotpotqa",
+        "searchR1_2wikimultihopqa",
+        "searchR1_musique",
+        "searchR1_bamboogle",
+    ]:
         from . import search_r1_like_qa_em
 
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
@@ -131,18 +108,33 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
 
     if isinstance(res, dict):
         return res
-    elif isinstance(res, (int, float, bool)):
+    elif isinstance(res, int | float | bool):
         return float(res)
     else:
         return float(res[0])
 
 
 @deprecated("verl.utils.reward_score.default_compute_score")
-def _default_compute_score(data_source, solution_str, ground_truth, extra_info=None, sandbox_fusion_url=None, concurrent_semaphore=None):
+def _default_compute_score(
+    data_source,
+    solution_str,
+    ground_truth,
+    extra_info=None,
+    sandbox_fusion_url=None,
+    concurrent_semaphore=None,
+    memory_limit_mb=None,
+):
     """
     Legacy function API to be deprecated. Please use `default_compute_score` instead.
     """
-    return default_compute_score(data_source, solution_str, ground_truth, extra_info, sandbox_fusion_url, concurrent_semaphore)
+    return default_compute_score(
+        data_source, solution_str, ground_truth, extra_info, sandbox_fusion_url, concurrent_semaphore, memory_limit_mb
+    )
+
+
+def get_default_compute_score(reward_name: str | None):
+    """Get the default compute_score function based on the reward manager type."""
+    return default_compute_score
 
 
 __all__ = ["default_compute_score"]

@@ -119,7 +119,8 @@ def run_variant(plan, variant):
     command = ["srun", f"--jobid={plan['job_id']}", "--overlap", "--nodes=1", "--ntasks=1",
                f"--nodelist={plan['node']}", "--cpus-per-task=192", "--gres=gpu:8",
                "--kill-on-bad-exit=1", f"--chdir={plan['artifact_root']}", variant["python"], "-u", "-m",
-               "qwen3_experiments.grpo_graph_benchmark", "--plan", plan["plan_path"],
+               variant.get("train_module", "qwen3_experiments.grpo_graph_benchmark"),
+               "--plan", plan["plan_path"],
                "--train-variant", variant["name"]]
     started = time.time()
     write_json(folder / "status.json", {"state": "running", "started": started, "command": command})

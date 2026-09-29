@@ -15,27 +15,24 @@
 import os
 import random
 import shutil
-import tempfile
-from typing import Union
 
 import numpy as np
 import torch
 import torch.distributed
-from filelock import FileLock
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
-from verl.utils.device import get_device_name, get_torch_device
+from verl.trainer.config import CheckpointConfig
+from verl.utils.device import get_device_name, get_torch_device, is_device_available
 
 
 class BaseCheckpointManager:
     """
-    A checkpoint manager that saves and loads
+    A checkpoint manager that saves and loads the following states in a SPMD way:
     - model
     - optimizer
     - lr_scheduler
     - extra_states
-    in a SPMD way.
 
     We save
     - sharded model states and optimizer states
@@ -48,11 +45,12 @@ class BaseCheckpointManager:
         model,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
-        processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
-        checkpoint_contents: DictConfig = None,
+        processing_class: PreTrainedTokenizer | ProcessorMixin = None,
+        checkpoint_config: DictConfig | CheckpointConfig = None,
     ):
-        checkpoint_load_contents = checkpoint_contents.get("load_contents", None) if checkpoint_contents else None
-        checkpoint_save_contents = checkpoint_contents.get("save_contents", None) if checkpoint_contents else None
+        self.checkpoint_config = checkpoint_config
+        checkpoint_load_contents = checkpoint_config.get("load_contents", None) if checkpoint_config else None
+        checkpoint_save_contents = checkpoint_config.get("save_contents", None) if checkpoint_config else None
         if checkpoint_load_contents is None:
             checkpoint_load_contents = ["model", "optimizer", "extra"]
         if checkpoint_save_contents is None:
@@ -94,9 +92,24 @@ class BaseCheckpointManager:
     @property
     def should_save_hf_model(self) -> bool:
         """
-        Returns True if 'hf_model' is in checkpoint_save_contents, indicating the model should be converted to hf model and saved.
+        Returns True if 'hf_model' is in checkpoint_save_contents, indicating the model should be converted to hf
+        model and saved.
         """
         return "hf_model" in self.checkpoint_save_contents
+
+    @property
+    def should_save_lora_only(self) -> bool:
+        if not self.checkpoint_config:
+            return False
+        if isinstance(self.checkpoint_config, dict):
+            return self.checkpoint_config.get("save_lora_only", False)
+        return getattr(self.checkpoint_config, "save_lora_only", False)
+
+    @staticmethod
+    def is_lora_only_state_dict(state_dict: dict) -> bool:
+        if not state_dict:
+            return False
+        return all("lora_" in k or ".adapter_" in k for k in state_dict)
 
     @property
     def should_load_model(self) -> bool:
@@ -119,10 +132,20 @@ class BaseCheckpointManager:
         """
         return "extra" in self.checkpoint_load_contents
 
+    @property
+    def should_load_hf_model(self) -> bool:
+        """
+        Returns True if 'hf_model' is in checkpoint_load_contents, indicating an HF-format model
+        checkpoint should be loaded (e.g. via a bridge).
+        """
+        return "hf_model" in self.checkpoint_load_contents
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None):
+    def save_checkpoint(
+        self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None
+    ):
         raise NotImplementedError
 
     @staticmethod
@@ -140,26 +163,35 @@ class BaseCheckpointManager:
                 continue
             shutil.rmtree(abs_path, ignore_errors=True)
 
-    @staticmethod
-    def local_mkdir(path):
-        if not os.path.isabs(path):
-            working_dir = os.getcwd()
-            path = os.path.join(working_dir, path)
+    def ensure_checkpoint_capacity(self, max_ckpt_to_keep: int):
+        """
+        Remove old checkpoints to make room for a new one, keeping a safety buffer.
 
-        # Using hash value of path as lock file name to avoid long file name
-        lock_filename = f"ckpt_{hash(path) & 0xFFFFFFFF:08x}.lock"
-        lock_path = os.path.join(tempfile.gettempdir(), lock_filename)
+        With max_ckpt_to_keep=1, this does nothing - we keep the existing checkpoint
+        until the new save completes successfully (handled by register_checkpoint).
+        For max_ckpt_to_keep >= 2, we keep (max_ckpt_to_keep - 1) checkpoints before save.
+        """
+        if not (max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 1):
+            return
+        if len(self.previous_saved_paths) >= max_ckpt_to_keep:
+            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
+            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
+            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
 
-        try:
-            with FileLock(lock_path, timeout=60):  # Add timeout
-                # make a new dir
-                os.makedirs(path, exist_ok=True)
-        except Exception as e:
-            print(f"Warning: Failed to acquire lock for {path}: {e}")
-            # Even if the lock is not acquired, try to create the directory
-            os.makedirs(path, exist_ok=True)
+    def register_checkpoint(self, new_path: str, max_ckpt_to_keep: int):
+        """
+        Register a successfully saved checkpoint and enforce retention limit.
 
-        return path
+        Adds the new checkpoint path to tracking and removes excess old
+        checkpoints beyond max_ckpt_to_keep.
+        """
+        self.previous_saved_paths.append(new_path)
+        if not (max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0):
+            return
+        if len(self.previous_saved_paths) > max_ckpt_to_keep:
+            keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep
+            self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
+            self.previous_saved_paths = self.previous_saved_paths[keep_start:]
 
     @staticmethod
     def get_rng_state():
@@ -169,7 +201,10 @@ class BaseCheckpointManager:
             "random": random.getstate(),
         }
 
-        if get_device_name() != "cpu":
+        # get_device_name() reports the platform's accelerator even on hosts that have
+        # none, so the accelerator RNG state is only reachable when the device is
+        # actually usable in this process.
+        if get_device_name() != "cpu" and is_device_available():
             rng_state[get_device_name()] = get_torch_device().get_rng_state()
 
         return rng_state
@@ -180,7 +215,7 @@ class BaseCheckpointManager:
         np.random.set_state(rng_state["numpy"])
         random.setstate(rng_state["random"])
 
-        if get_device_name() != "cpu":
+        if is_device_available() and get_device_name() in rng_state:
             get_torch_device().set_rng_state(rng_state[get_device_name()])
 
 
@@ -202,7 +237,8 @@ def find_latest_ckpt_path(path, directory_format="global_step_{}"):
 
     tracker_file = get_checkpoint_tracker_filename(path)
     if not os.path.exists(tracker_file):
-        print(f"Checkpoint tracker file does not exist: {tracker_file}")
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            print(f"Checkpoint tracker file does not exist: {tracker_file}")
         return None
 
     with open(tracker_file, "rb") as f:
@@ -221,3 +257,37 @@ def get_checkpoint_tracker_filename(root_path: str):
     Tracker file rescords the latest chckpoint during training to restart from.
     """
     return os.path.join(root_path, "latest_checkpointed_iteration.txt")
+
+
+def should_save_ckpt_esi(max_steps_duration: float, save_ckpt_duration: float = 60, redundant_time: float = 0) -> bool:
+    """
+    Determine if checkpoint should be saved based on capacity esi expiration.
+
+    Args:
+        max_steps_duration: Max estimated time (seconds) required to complete one training step
+        save_ckpt_duration: Estimated time (seconds) required to save checkpoint (default: 60)
+        redundant_time: Additional buffer time (seconds) for unexpected delays (default: 0)
+    """
+    exp_ts_mlp = os.getenv("MLP_CURRENT_CAPACITY_BLOCK_EXPIRATION_TIMESTAMP")  # vemlp
+    exp_ts_aws = os.getenv("SAGEMAKER_CURRENT_CAPACITY_BLOCK_EXPIRATION_TIMESTAMP")  # aws
+    if exp_ts_mlp:
+        try:
+            import time
+
+            remaining = float(exp_ts_mlp) - time.time()
+        except ValueError:
+            return False
+        return (
+            remaining > 0
+            and max_steps_duration > 0
+            and remaining <= save_ckpt_duration + max_steps_duration + redundant_time
+        )
+    elif exp_ts_aws:
+        from datetime import datetime, timedelta
+
+        expiration_time = datetime.fromtimestamp(int(exp_ts_aws))
+        time_difference = expiration_time - datetime.now()
+        threshold_minutes = (save_ckpt_duration + max_steps_duration + redundant_time) / 60
+        return time_difference < timedelta(minutes=threshold_minutes)
+    else:
+        return False

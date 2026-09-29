@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 from transformers.cache_utils import Cache
@@ -47,7 +47,9 @@ def forward_base_model(
     ```"""
 
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-    output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+    )
 
     # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
     outputs = self.model(
@@ -71,7 +73,7 @@ def forward_with_torch_backend(
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[Union["Cache", List[torch.FloatTensor]]] = None,
+    past_key_values: Optional[Union["Cache", list[torch.FloatTensor]]] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     labels: Optional[torch.LongTensor] = None,
     use_cache: Optional[bool] = None,
@@ -79,10 +81,11 @@ def forward_with_torch_backend(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     cache_position: Optional[torch.LongTensor] = None,
-    logits_to_keep: Union[int, torch.Tensor] = 0,
+    logits_to_keep: int | torch.Tensor = 0,
     temperature: float = 1.0,
+    shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
-) -> Union[Tuple, CausalLMOutputForPPO]:
+) -> tuple | CausalLMOutputForPPO:
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
 
     outputs = forward_base_model(
@@ -103,15 +106,20 @@ def forward_with_torch_backend(
     if not return_dict:
         raise NotImplementedError("forward_with_torch_backend has to return_dict")
 
-    # Loss calculations
-    if labels is not None:
+    # Loss calculations.
+    # When the engine has already prepared globally-rolled labels (e.g. the FSDP
+    # path under Ulysses SP, see issue #6068), it passes them as `shift_labels`
+    # so we don't redo `torch.roll` on a sequence-parallel-sliced shard.
+    if shift_labels is not None:
+        rolled_labels = shift_labels
+    elif labels is not None:
         rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
     else:
         raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO()
+    fused_linear_for_ppo = FusedLinearForPPO(impl_backend=getattr(self, "_verl_fused_kernels_backend", "torch"))
     log_probs, entropy = fused_linear_for_ppo.forward(
         hidden_states=hidden_states,
         vocab_weights=self.lm_head.weight,
@@ -133,7 +141,7 @@ def forward_with_triton_backend(
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[Union["Cache", List[torch.FloatTensor]]] = None,
+    past_key_values: Optional[Union["Cache", list[torch.FloatTensor]]] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     labels: Optional[torch.LongTensor] = None,
     use_cache: Optional[bool] = None,
@@ -141,11 +149,12 @@ def forward_with_triton_backend(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     cache_position: Optional[torch.LongTensor] = None,
-    logits_to_keep: Union[int, torch.Tensor] = 0,
+    logits_to_keep: int | torch.Tensor = 0,
     temperature: float = 1.0,
+    shift_labels: Optional[torch.LongTensor] = None,
     **loss_kwargs,
-) -> Union[Tuple, CausalLMOutputForPPO]:
-    from verl.utils.kernel import linear_cross_entropy
+) -> tuple | CausalLMOutputForPPO:
+    from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 
     outputs = forward_base_model(
         self,
@@ -166,8 +175,11 @@ def forward_with_triton_backend(
     if not return_dict:
         raise NotImplementedError("forward_with_triton_backend has to return_dict")
 
-    # Loss calculations
-    if labels is not None:
+    # Loss calculations. See `forward_with_torch_backend` for why `shift_labels`
+    # takes precedence over local `torch.roll` (issue #6068).
+    if shift_labels is not None:
+        rolled_labels = shift_labels
+    elif labels is not None:
         rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
     elif input_ids is not None:
         rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)

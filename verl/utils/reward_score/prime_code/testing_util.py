@@ -28,12 +28,25 @@ from enum import Enum
 
 # for capturing the stdout
 from io import StringIO
+from types import ModuleType
 
 # used for testing the code that reads from input
 from unittest.mock import mock_open, patch
 
 import numpy as np
-from pyext import RuntimeModule
+
+
+def module_from_string(name: str, code: str) -> ModuleType:
+    """Compile ``code`` into a new in-memory module registered under ``name``.
+
+    Replaces ``pyext.RuntimeModule.from_string``, since ``pyext`` is unmaintained and cannot be
+    installed on Python 3.12+. The ``<string>`` filename is what :func:`clean_traceback` looks for
+    when trimming the traceback of a failing generated solution.
+    """
+    module = ModuleType(name)
+    exec(compile(code, "<string>", "exec"), module.__dict__)
+    sys.modules[name] = module
+    return module
 
 
 def truncatefn(s, length=300):
@@ -121,7 +134,7 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 print(f"sol = {sol}")
             signal.alarm(timeout)
             try:
-                tmp_sol = RuntimeModule.from_string("tmp_sol", "", sol)
+                tmp_sol = module_from_string("tmp_sol", sol)
                 tmp = tmp_sol if "class Solution" not in test else tmp_sol.Solution()
                 signal.alarm(0)
             except Exception as e:
@@ -181,7 +194,7 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
             method_name = "code"
             signal.alarm(timeout)
             try:
-                tmp_sol = RuntimeModule.from_string("tmp_sol", "", sol)
+                tmp_sol = module_from_string("tmp_sol", sol)
                 tmp = tmp_sol
                 signal.alarm(0)
             except Exception as e:
@@ -223,7 +236,9 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 in_outs["outputs"][index] = json.loads(in_outs["outputs"][index])
 
                 truncate_line_size = 300 // (raw_inputs.count("\n") + 1)
-                raw_inputs = "\n".join([truncatefn(line, truncate_line_size) for line in raw_inputs.strip().split("\n")])
+                raw_inputs = "\n".join(
+                    [truncatefn(line, truncate_line_size) for line in raw_inputs.strip().split("\n")]
+                )
                 raw_outputs = truncatefn(raw_outputs, 200)
             else:
                 raw_inputs = truncatefn(raw_inputs)
@@ -246,7 +261,10 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 pass
 
             if debug:
-                print(f"time: {datetime.now().time()} testing index = {index}  inputs = {inputs}, {type(inputs)}. type = {which_type}")
+                print(
+                    f"time: {datetime.now().time()} testing index = {index}  inputs = {inputs}, {type(inputs)}. "
+                    f"type = {which_type}"
+                )
             if which_type == CODE_TYPE.call_based:  # Call-based
                 signal.alarm(timeout)
                 faulthandler.enable()
@@ -296,7 +314,10 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 faulthandler.disable()
                 signal.alarm(0)
                 if debug:
-                    print(f"outputs = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                    print(
+                        f"outputs = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, "
+                        f"{type(inputs)}, {output == [in_outs['outputs'][index]]}"
+                    )
             elif which_type == CODE_TYPE.standard_input:  # Standard input
                 faulthandler.enable()
                 passed = False
@@ -331,9 +352,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                     if debug:
                         nl = "\n"
                         if not isinstance(inputs, list):
-                            print(f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                            print(
+                                f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                                f"inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, "
+                                f"{output == [in_outs['outputs'][index]]}"
+                            )
                         else:
-                            print(f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                            print(
+                                f"not passed output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                                f"inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}"
+                            )
                     continue
 
                 if passed and debug:
@@ -368,7 +396,9 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 if isinstance(in_outs["outputs"][index], list):
                     for tmp_index, i in enumerate(in_outs["outputs"][index]):
                         in_outs["outputs"][index][tmp_index] = i.split("\n")
-                        in_outs["outputs"][index][tmp_index] = [x.strip() for x in in_outs["outputs"][index][tmp_index] if x]
+                        in_outs["outputs"][index][tmp_index] = [
+                            x.strip() for x in in_outs["outputs"][index][tmp_index] if x
+                        ]
                 else:
                     in_outs["outputs"][index] = in_outs["outputs"][index].split("\n")
                     in_outs["outputs"][index] = list(filter(len, in_outs["outputs"][index]))
@@ -394,9 +424,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 if debug:
                     nl = "\n"
                     if not isinstance(inputs, list):
-                        print(f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, {output == [in_outs['outputs'][index]]} {tmp_result=}")
+                        print(
+                            f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                            f"inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, "
+                            f"{output == [in_outs['outputs'][index]]} {tmp_result=}"
+                        )
                     else:
-                        print(f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]} {tmp_result=}")
+                        print(
+                            f"@1 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, "
+                            f"{type(inputs)}, {output == [in_outs['outputs'][index]]} {tmp_result=}"
+                        )
 
                 if debug:
                     print(f"{tmp_result=} @a")
@@ -414,13 +451,23 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                     print(f"{tmp_result=} @b")
 
                 try:
-                    all_ints = all(combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output, in_outs["outputs"][index]))
+                    all_ints = all(
+                        combined_int_check(e1) and combined_int_check(e2)
+                        for e1, e2 in zip(output, in_outs["outputs"][index], strict=True)
+                    )
                     if not all_ints:
                         if debug:
-                            print([combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output, in_outs["outputs"][index])])
+                            print(
+                                [
+                                    combined_int_check(e1) and combined_int_check(e2)
+                                    for e1, e2 in zip(output, in_outs["outputs"][index], strict=True)
+                                ]
+                            )
                         output_float = [float(e) for e in output]
                         gt_float = [float(e) for e in in_outs["outputs"][index]]
-                        tmp_result = tmp_result or ((len(output_float) == len(gt_float)) and np.allclose(output_float, gt_float))
+                        tmp_result = tmp_result or (
+                            (len(output_float) == len(gt_float)) and np.allclose(output_float, gt_float)
+                        )
                 except Exception:
                     pass
 
@@ -429,11 +476,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
 
                 try:
                     if isinstance(output[0], list):
-                        all_ints = all(combined_int_check(e1) and combined_int_check(e2) for e1, e2 in zip(output[0], in_outs["outputs"][index]))
+                        all_ints = all(
+                            combined_int_check(e1) and combined_int_check(e2)
+                            for e1, e2 in zip(output[0], in_outs["outputs"][index], strict=True)
+                        )
                         if not all_ints:
                             output_float = [float(e) for e in output[0]]
                             gt_float = [float(e) for e in in_outs["outputs"][index][0]]
-                            tmp_result = tmp_result or ((len(output_float) == len(gt_float)) and np.allclose(output_float, gt_float))
+                            tmp_result = tmp_result or (
+                                (len(output_float) == len(gt_float)) and np.allclose(output_float, gt_float)
+                            )
                 except Exception:
                     pass
 
@@ -498,9 +550,16 @@ def run_test(in_outs, test=None, debug=False, timeout=15):
                 if debug:
                     nl = "\n"
                     if not isinstance(inputs, list):
-                        print(f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                        print(
+                            f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, "
+                            f"inputs = {inputs.replace(nl, ' new-line ')}, {type(inputs)}, "
+                            f"{output == [in_outs['outputs'][index]]}"
+                        )
                     else:
-                        print(f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, {type(inputs)}, {output == [in_outs['outputs'][index]]}")
+                        print(
+                            f"@2 output = {output}, test outputs = {in_outs['outputs'][index]}, inputs = {inputs}, "
+                            f"{type(inputs)}, {output == [in_outs['outputs'][index]]}"
+                        )
 
                     print(f"results = {results}")
 
@@ -631,3 +690,7 @@ def reliability_guard(maximum_memory_bytes=None):
     sys.modules["resource"] = None
     sys.modules["psutil"] = None
     sys.modules["tkinter"] = None
+
+    # Disable some built-in functions that can be destructive
+    for mod in ["subprocess", "ctypes"]:
+        sys.modules[mod] = None

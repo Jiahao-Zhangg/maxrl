@@ -12,39 +12,97 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import multiprocessing
-import time
-from typing import Callable, Optional
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+from typing import Any, Callable, Optional
 
+import psutil
 import torch
 from transformers import PreTrainedTokenizer
 
 from verl import DataProto
+from verl.utils.ray_utils import get_event_loop
 from verl.utils.reward_score import default_compute_score
 from verl.workers.reward_manager import register
+from verl.workers.reward_manager.abstract import AbstractRewardManager
 
 
-def _compute_single_score(args):
-    """Worker function for multiprocessing Pool"""
-    evaluation_func, task, completion, reference, extra_info = args
+async def single_compute_score(evaluation_func, completion, reference, task, task_extra_info, executor, timeout=300.0):
+    loop = get_event_loop()
     try:
-        result = evaluation_func(task, completion, reference, extra_info)
-        if isinstance(result, (int, float, bool)):
-            return float(result)
-        elif isinstance(result, dict):
-            return float(result.get("score", 0.0))
-        else:
-            return float(result[0]) if result else 0.0
+        # Ensure process_completion is called properly
+        future = loop.run_in_executor(executor, partial(evaluation_func, task, completion, reference, task_extra_info))
+        return await asyncio.wait_for(future, timeout=timeout)
+    except asyncio.TimeoutError:
+        print(f"[Timeout] Task timeout: {completion}")
+        return None  # Default value for timed-out rows
     except Exception as e:
-        print(f"[Error] Task failed: {e}")
-        return 0.0
+        print(f"[Error] Task failed: {e}, completion: {completion[:80]}")
+        return None  # Default value for failed rows
+
+
+async def parallel_compute_score_async(
+    evaluation_func, completions, references, tasks, extra_info=None, num_processes=64
+):
+    if extra_info is None:
+        extra_info = [None] * len(tasks)
+    scores = []
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        # to prevent very occasional starvation caused by some anomalous programs ( like infinite loop ), the
+        # exceptions in async programs will instantly halt the evaluation, and all summoned processes will be killed.
+        try:
+            # Create tasks for all rows
+            tasks_async = [
+                single_compute_score(evaluation_func, c, r, t, ei, executor, timeout=300.0)
+                for c, r, t, ei in zip(completions, references, tasks, extra_info, strict=True)
+            ]
+            results = await asyncio.gather(*tasks_async, return_exceptions=False)
+        except Exception as e:
+            print(f"[Exception] async gather failed: {e}")
+            raise
+        finally:
+            terminated_count = 0
+            for pid, proc in executor._processes.items():
+                try:
+                    p = psutil.Process(pid)
+                    p.terminate()
+                    try:
+                        p.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        p.kill()
+                    terminated_count += 1
+                except Exception:
+                    pass
+            print(f"[Shutdown] {terminated_count} subprocess(es) terminated.")
+
+    # Process results
+    for result, completion, reference, task in zip(results, completions, references, tasks, strict=True):
+        if isinstance(result, Exception) or result is None:
+            # Handle failed or timed-out tasks
+            scores.append(0.0)
+        elif isinstance(result, int | float | bool):
+            scores.append(float(result))
+        else:
+            scores.append(float(result[0]))
+    return scores
+
+
+def run_reward_scoring(evaluation_func, completions, references, tasks, extra_info=None, num_processes=64):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(
+            parallel_compute_score_async(evaluation_func, completions, references, tasks, extra_info, num_processes)
+        )
+    finally:
+        loop.close()
 
 
 @register("prime")
-class PrimeRewardManager:
+class PrimeRewardManager(AbstractRewardManager):
     """
     The Reward Manager used in https://github.com/PRIME-RL/PRIME
-    Uses a persistent multiprocessing.Pool for parallel reward computation.
     """
 
     def __init__(
@@ -53,75 +111,19 @@ class PrimeRewardManager:
         num_examine: int,
         compute_score: Optional[Callable] = None,
         reward_fn_key: str = "data_source",
-        num_processes: int = 32,
-        chunksize: Optional[int] = None,
     ) -> None:
         self.tokenizer = tokenizer
-        self.num_examine = num_examine
+        self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
-        self.num_processes = num_processes
-        self.chunksize = chunksize  # If None, will compute dynamically
-        
-        # Create persistent process pool with spawn context
-        print(f"[PrimeReward] Creating persistent Pool with {num_processes} processes (spawn context)...")
-        t_start = time.time()
-        self._mp_context = multiprocessing.get_context("spawn")
-        self._pool = self._mp_context.Pool(processes=num_processes)
-        print(f"[PrimeReward] Pool created in {time.time() - t_start:.3f}s (will be reused for all batches)")
-
-    def __del__(self):
-        """Clean up the process pool when the manager is destroyed"""
-        if hasattr(self, '_pool') and self._pool is not None:
-            print("[PrimeReward] Closing process pool...")
-            self._pool.close()
-            self._pool.join()
-            print("[PrimeReward] Pool closed.")
-
-    def _run_reward_scoring(self, completions, references, tasks, extra_info=None):
-        """
-        Parallel reward scoring using the persistent process pool.
-        """
-        t_total_start = time.time()
-        
-        if extra_info is None:
-            extra_info = [None] * len(tasks)
-        
-        # Prepare arguments for each task
-        t_prep_start = time.time()
-        args_list = [
-            (self.compute_score, task, completion, reference, ei)
-            for task, completion, reference, ei in zip(tasks, completions, references, extra_info)
-        ]
-        t_prep = time.time() - t_prep_start
-        
-        try:
-            t_map_start = time.time()
-            # Use chunksize to reduce IPC overhead: each process gets a batch of tasks at once
-            # For lightweight tasks like maze, use larger chunksize to minimize IPC
-            if self.chunksize is not None:
-                chunksize = self.chunksize
-            else:
-                # Dynamic: each process gets roughly equal workload
-                chunksize = max(1, len(args_list) // self.num_processes)
-            scores = self._pool.map(_compute_single_score, args_list, chunksize=chunksize)
-            t_map = time.time() - t_map_start
-            
-            t_total = time.time() - t_total_start
-            print(f"[PrimeReward] {len(scores)} scores in {t_total:.3f}s (prep={t_prep:.3f}s, map={t_map:.3f}s, chunksize={chunksize}), mean={sum(scores)/len(scores):.4f}")
-            return scores
-        except Exception as e:
-            print(f"[PrimeReward] ERROR: {e}, falling back to sequential...")
-            t_seq_start = time.time()
-            scores = [_compute_single_score(args) for args in args_list]
-            print(f"[PrimeReward] Sequential: {time.time() - t_seq_start:.3f}s for {len(scores)} scores")
-            return scores
 
     def verify(self, data):
         """
         verify the batch and save as ``acc`` tensor
         """
+        # batched scoring
         prompt_ids = data.batch["prompts"]
+
         response_ids = data.batch["responses"]
         sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
         ground_truth = [data_item.non_tensor_batch["reward_model"]["ground_truth"] for data_item in data]
@@ -129,34 +131,40 @@ class PrimeRewardManager:
         extra_info = data.non_tensor_batch.get("extra_info", None)
 
         assert len(sequences_str) == len(ground_truth) == len(data_sources)
-        
         try:
-            scores = self._run_reward_scoring(
+            scores = run_reward_scoring(
+                self.compute_score,
                 completions=sequences_str,
                 references=ground_truth,
                 tasks=data_sources,
                 extra_info=extra_info,
+                num_processes=64,
             )
-        except Exception as e:
-            print(f"[Error] Unexpected error during scoring: {e}. Setting all as 0.")
+        except asyncio.TimeoutError:
+            print("[Timeout] Global reward scoring timed out. Setting all as 0.")
             scores = [0.0 for _ in range(len(sequences_str))]
-        
+        except Exception as e:
+            print(f"[Error] Unexpected error during scoring. Setting all as 0. {e}")
+            scores = [0.0 for _ in range(len(sequences_str))]
         data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=prompt_ids.device)
         return scores
 
-    def __call__(self, data: DataProto, return_dict: bool = False):
+    def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """We will expand this function gradually based on the available datasets"""
 
-        if "rm_scores" in data.batch.keys():
-            if return_dict:
-                return {"reward_tensor": data.batch["rm_scores"]}
-            return data.batch["rm_scores"]
+        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
+        reward_from_rm_scores = self._extract_reward_from_rm_scores(data, return_dict)
+        if reward_from_rm_scores is not None:
+            return reward_from_rm_scores
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+
         already_print_data_sources = {}
 
+        # batched scoring
         prompt_ids = data.batch["prompts"]
         prompt_length = prompt_ids.shape[-1]
+
         response_ids = data.batch["responses"]
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=-1)
         sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
@@ -173,7 +181,7 @@ class PrimeRewardManager:
 
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(sequences_str[i])
+                print(sequences_str)
 
         if return_dict:
             return {"reward_tensor": reward_tensor}

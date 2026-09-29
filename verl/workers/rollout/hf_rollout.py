@@ -19,7 +19,6 @@ to perform generation.
 """
 
 import contextlib
-import logging
 
 import torch
 import torch.distributed
@@ -27,9 +26,6 @@ from tensordict import TensorDict
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import GenerationConfig
-from tqdm import tqdm
-
-logger = logging.getLogger(__name__)
 
 from verl import DataProto
 from verl.utils.device import get_device_name, get_torch_device
@@ -47,73 +43,10 @@ class HFRollout(BaseRollout):
         self.module = module
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
-        batch_size = prompts.batch.batch_size[0]  # 当前卡处理的batch数（单卡）
-        is_validate = prompts.meta_info.get("validate", False)
-        
-        # micro_batch_size永远表示sample level
-        # 在validation阶段：val_kwargs.n已经提前展平，所以batch_size已经是sample level
-        # 在train阶段：batch_size是prompt level，需要除以rollout.n得到prompt batch size
-        micro_batch_size_sample_level = self.config.get("micro_batch_size", batch_size)
-        
-        if is_validate:
-            # validation阶段：batch_size已经是sample level（val_kwargs.n已展平）
-            # num_return_sequences=1，所以micro_batch_size直接使用
-            effective_batch_size = batch_size
-            effective_micro_batch_size = micro_batch_size_sample_level
-        else:
-            # train阶段：batch_size是prompt level，需要转换为prompt batch size
-            # 因为每个prompt会生成rollout.n个samples，所以prompt batch size = sample batch size / rollout.n
-            rollout_n = self.config.get("n", 1)
-            effective_batch_size = batch_size  # prompt level
-            effective_micro_batch_size = max(micro_batch_size_sample_level // rollout_n, 1)  # prompt level
-        
-        num_chunks = max(effective_batch_size // effective_micro_batch_size, 1)  # 当前卡需要分多少轮
+        batch_size = prompts.batch.batch_size[0]
+        num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
-        
-        # 获取分布式信息
-        if torch.distributed.is_initialized():
-            rank = torch.distributed.get_rank()
-            world_size = torch.distributed.get_world_size()
-        else:
-            rank = 0
-            world_size = 1
-        
-        # 添加tqdm进度条，显示总batch数、总轮数、当前轮数
-        # 注意：micro_batch_size永远表示sample level
-        # 在数据并行模式下，每张卡会收到总batch的一部分（通过DP_COMPUTE_PROTO分发）
-        # 然后每张卡内部再按照effective_micro_batch_size分chunks处理
-        output = []
-        if world_size > 1:
-            # 多卡情况：显示当前GPU的信息
-            if is_validate:
-                desc = f"HFRollout[GPU {rank}/{world_size-1}] (val): {effective_batch_size} samples on this GPU, {num_chunks} rounds"
-            else:
-                desc = f"HFRollout[GPU {rank}/{world_size-1}] (train): {effective_batch_size} prompts on this GPU, {num_chunks} rounds"
-        else:
-            # 单卡情况
-            if is_validate:
-                desc = f"HFRollout (val): {effective_batch_size} samples in {num_chunks} rounds"
-            else:
-                desc = f"HFRollout (train): {effective_batch_size} prompts in {num_chunks} rounds"
-        
-        # 只在rank 0显示进度条，避免多行输出混乱
-        # 注意：每张GPU都会独立处理自己的数据分片，并按照effective_micro_batch_size分chunks
-        with tqdm(total=num_chunks, desc=desc, unit="round", disable=(rank != 0)) as pbar:
-            for round_idx, p in enumerate(batch_prompts, 1):
-                postfix_dict = {
-                    "round": f"{round_idx}/{num_chunks}",
-                    "batches_per_gpu": effective_batch_size,
-                    "micro_batch_size": effective_micro_batch_size,
-                    "micro_batch_size_sample_level": micro_batch_size_sample_level,
-                }
-                if not is_validate:
-                    postfix_dict["rollout_n"] = self.config.get("n", 1)
-                if world_size > 1:
-                    postfix_dict["world_size"] = world_size
-                pbar.set_postfix(postfix_dict)
-                output.append(self._generate_minibatch(p))
-                pbar.update(1)
-        
+        output = [self._generate_minibatch(p) for p in batch_prompts]
         output = DataProto.concat(output)
         return output
 
@@ -152,7 +85,9 @@ class HFRollout(BaseRollout):
                 "top_p": top_p,
                 "top_k": top_k,
                 "temperature": temperature,
-                "num_return_sequences": self.config.n,
+                # already repeat in ray_trainer
+                # https://github.com/verl-project/verl/blob/2fdfbdcba6f2e076f64bc47922d8fe6cf7dc7da5/verl/trainer/ppo/ray_trainer.py#L1117
+                "num_return_sequences": 1,
             }
 
         # make config according to generate mode
@@ -170,39 +105,14 @@ class HFRollout(BaseRollout):
         self.module.eval()
         param_ctx = contextlib.nullcontext()
 
-        is_fsdp = isinstance(self.module, FSDP)
-        print(f"[HFRollout] Module is FSDP: {is_fsdp}", flush=True)
-        
-        if is_fsdp:
-            # NOTE: recurse=True is required to summon all submodule params for correct generation
-            # The original recurse=False caused incorrect outputs because submodule params were not summoned
-            print("[HFRollout] Creating summon_full_params context with recurse=True", flush=True)
-            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=True)
-        
-        from verl.utils.torch_dtypes import PrecisionType
-        torch_dtype = PrecisionType.to_dtype(self.config.get("dtype", "bfloat16"))
-        
-        with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch_dtype):
-            # Log parameter stats after entering summon context
-            total_params = sum(p.numel() for p in self.module.parameters())
-            non_zero_params = sum((p != 0).sum().item() for p in self.module.parameters())
-            first_param = next(self.module.parameters())
-            print(f"[HFRollout] Inside param context - total_params: {total_params:,}, "
-                  f"non_zero_params: {non_zero_params:,}, "
-                  f"first_param shape: {first_param.shape}, "
-                  f"first_param mean: {first_param.mean().item():.6f}, "
-                  f"first_param std: {first_param.std().item():.6f}", flush=True)
-            
-            print(f"[HFRollout] Starting generate with eos_token_id={eos_token_id}, "
-                  f"pad_token_id={pad_token_id}, max_new_tokens={response_length}, "
-                  f"do_sample={do_sample}, temperature={temperature}", flush=True)
-            
-            # NOTE: Do NOT pass position_ids - HuggingFace generate computes them automatically
-            # Passing explicit position_ids can cause issues with generation
+        if isinstance(self.module, FSDP):
+            # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
+            param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+        with param_ctx, torch.autocast(device_type=get_device_name(), dtype=torch.bfloat16):
             output = self.module.generate(
                 input_ids=idx,
                 attention_mask=attention_mask,
-                # position_ids=position_ids,  # Removed: causes generation issues
+                position_ids=position_ids,
                 do_sample=do_sample,
                 max_new_tokens=response_length,
                 eos_token_id=eos_token_id,
@@ -216,10 +126,6 @@ class HFRollout(BaseRollout):
         # TODO: filter out the seq with no answers like ds-chat
         seq = output.sequences
         generated_batch_size = seq.size(0)  # bs * num_return_sequences
-        
-        # Log generation results
-        logger.info(f"[HFRollout] Generation complete - output shape: {seq.shape}, "
-                   f"generated_batch_size: {generated_batch_size}")
 
         # huggingface generate will stop generating when all the batch reaches [EOS].
         # We have to pad to response_length
@@ -248,7 +154,9 @@ class HFRollout(BaseRollout):
         response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
-        response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
+        response_attention_mask = get_response_mask(
+            response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype
+        )
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
 
         batch = TensorDict(
