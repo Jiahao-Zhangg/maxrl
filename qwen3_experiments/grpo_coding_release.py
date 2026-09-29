@@ -135,6 +135,31 @@ def assert_versions():
     return versions
 
 
+def configure_continuation(plan, predecessor):
+    """Add one complete epoch while retaining the predecessor's global steps."""
+    if plan["training"]["algorithm"] != "grpo" or predecessor["training"].get("algorithm", "grpo") != "grpo":
+        raise ValueError("Epoch continuation currently requires two GRPO runs")
+    for key in ("dataset_sha256", "dataset_rows", "base_model_hashes", "grading"):
+        if plan[key] != predecessor[key]:
+            raise ValueError(f"Continuation changed {key}")
+    for key in ("batch_size", "n", "max_num_seqs", "temperature", "top_p", "top_k", "shuffle", "seed"):
+        if plan["training"][key] != predecessor["training"][key]:
+            raise ValueError(f"Continuation changed training {key}")
+    steps_per_epoch, remainder = divmod(plan["dataset_rows"], plan["training"]["batch_size"])
+    start = predecessor["total_steps"]
+    if remainder or start <= 0 or start != steps_per_epoch * predecessor["training"]["epochs"]:
+        raise ValueError("Continuation requires a complete predecessor epoch")
+    plan.update(start_step=start, total_steps=start + steps_per_epoch,
+                checkpoint_steps=list(range(start + 10, start + steps_per_epoch + 1, 10)),
+                continuation={"step": start, "checkpoint_repo": f"{predecessor['hf_repo_prefix']}-step_{start}",
+                              "restore_contents": ["model", "optimizer", "extra", "dataloader"]})
+    plan["training"].update(epochs=predecessor["training"]["epochs"] + 1, epochs_this_stage=1)
+
+
+def training_steps(plan):
+    return range(plan.get("start_step", 0) + 1, plan["total_steps"] + 1)
+
+
 def prepare(args):
     import pyarrow.parquet as pq
     from huggingface_hub import HfApi
@@ -153,6 +178,8 @@ def prepare(args):
     rollout_n = args.n if args.n is not None else (8 if algorithm == "grpo" else 16)
     if rollout_n < 2:
         raise ValueError("Grouped coding RL requires N >= 2")
+    if args.continue_from_predecessor and args.after_root is None:
+        raise ValueError("--continue-from-predecessor requires --after-root")
     root, scratch = args.root.absolute(), args.scratch.absolute()
     if (root / "plan.json").exists():
         raise ValueError("Run is already prepared; use its frozen plan")
@@ -211,7 +238,8 @@ def prepare(args):
         "checkpoint_dir": str(scratch / "checkpoints"), "checkpoint_steps": list(range(10, 101, 10)),
         "hf_repo_prefix": args.hf_prefix, "hf_account": account, "public": True,
         "hf_token_path": hf_constants.HF_TOKEN_PATH,
-        "holder_locks": baseline["holder_locks"], "total_steps": 100, "expected_rollouts_per_step": 32 * rollout_n,
+        "holder_locks": baseline["holder_locks"], "start_step": 0, "total_steps": 100,
+        "expected_rollouts_per_step": 32 * rollout_n,
         "wandb_id": hashlib.sha256(str(root).encode()).hexdigest()[:8], "experiment_name": args.experiment_name,
         "sampling": {"n": 1, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "max_tokens": 32768,
                      "ignore_eos": False, "skip_special_tokens": True},
@@ -231,6 +259,8 @@ def prepare(args):
         if predecessor["output_root"] == plan["output_root"]:
             raise ValueError("A run cannot depend on itself")
         plan["predecessor"] = {"root": predecessor["output_root"], "plan_sha256": digest(predecessor_path)}
+        if args.continue_from_predecessor:
+            configure_continuation(plan, predecessor)
     plan["holdouts"] = evaluation.prepare_holdouts(plan, args.baseline_root, args.competition_root)
     max_prompt = max(v["max_prompt_tokens"] for v in plan["holdouts"].values())
     plan["evaluation_engine"] = {
@@ -258,6 +288,8 @@ def prepare(args):
         "reward.custom_reward_function.reward_kwargs.grading_plan": str(grading_plan),
         "trainer.default_local_dir": plan["checkpoint_dir"], "trainer.rollout_data_dir": str(scratch / "rollouts"),
         "trainer.experiment_name": args.experiment_name,
+        "trainer.total_epochs": plan["training"]["epochs"],
+        "trainer.total_training_steps": plan["total_steps"],
         "ray_kwargs.ray_init._temp_dir": f"/tmp/cr_{plan['wandb_id']}",
         "actor_rollout_ref.rollout.agent.custom_async_server.path":
             str(runtime / "qwen3_experiments/grpo_release_server.py"),
@@ -354,9 +386,10 @@ def monitor_checkpoints(plan):
                     finish_verified_deletion(checkpoint, receipt)
                     persist(plan, name, {**receipt, "state": "archived_and_deleted", "deleted_at": now()})
                 archived = [s for s in plan["checkpoint_steps"] if archive_receipt(plan, s)]
-                persist(plan, "checkpoint_status.json", {"state": "complete" if len(archived) == 10 else "monitoring",
+                done = len(archived) == len(plan["checkpoint_steps"])
+                persist(plan, "checkpoint_status.json", {"state": "complete" if done else "monitoring",
                                                         "archived_steps": archived, "pid": os.getpid()})
-                if len(archived) == 10:
+                if done:
                     return
                 time.sleep(2)
             except Exception as exc:
@@ -392,14 +425,15 @@ def monitor_rollouts(plan):
                     ensure_public_repository(api, repo, "dataset")
                     api.upload_file(
                         repo_id=repo, repo_type="dataset", path_in_repo="README.md",
-                        path_or_fileobj=("---\nlicense: apache-2.0\n---\n# Coding GRPO rollouts\n\n"
+                        path_or_fileobj=("---\nlicense: apache-2.0\n---\n# Coding RL rollouts\n\n"
                                          f"{plan['experiment_name']}\n\n"
-                                         "One verified gzip JSONL shard per training step; 256 responses per shard.\n"
+                                         "One verified gzip JSONL shard per training step; "
+                                         f"{plan['expected_rollouts_per_step']} responses per shard.\n"
                                          "LCB binary grading after thinking, without an EOS gate.\n").encode(),
                     )
                     initialized = True
                 for path in sorted((Path(plan["scratch"]) / "rollouts").glob("*.jsonl")):
-                    if not path.stem.isdigit() or not 1 <= int(path.stem) <= plan["total_steps"]:
+                    if not path.stem.isdigit() or int(path.stem) not in training_steps(plan):
                         continue
                     step = int(path.stem)
                     complete = complete_records(path, step, plan["expected_rollouts_per_step"])
@@ -423,11 +457,12 @@ def monitor_rollouts(plan):
                     path.unlink()
                     compressed.unlink()
                     persist(plan, f"rollout_receipts/{step}.json", {**receipt, "state": "archived_and_deleted"})
-                archived = [step for step in range(1, 101)
+                archived = [step for step in training_steps(plan)
                             if state(plan, f"rollout_receipts/{step}.json").get("state") == "archived_and_deleted"]
-                persist(plan, "rollout_status.json", {"state": "complete" if len(archived) == 100 else "monitoring",
+                done = len(archived) == len(training_steps(plan))
+                persist(plan, "rollout_status.json", {"state": "complete" if done else "monitoring",
                                                      "archived_steps": archived, "pid": os.getpid()})
-                if len(archived) == 100 and state(plan, "training_exit.json").get("exit_code") == 0:
+                if done and state(plan, "training_exit.json").get("exit_code") == 0:
                     return
                 time.sleep(15)
             except Exception as exc:
@@ -435,13 +470,13 @@ def monitor_rollouts(plan):
                 time.sleep(20)
 
 
-def restore_checkpoint(plan, step, *, models_only=False):
+def restore_checkpoint(plan, step, *, models_only=False, destination_scratch=None):
     from huggingface_hub import snapshot_download
 
     receipt = archive_receipt(plan, step)
     if receipt is None:
         raise ValueError("No verified checkpoint to restore")
-    root = Path(plan["scratch"]) / ("merge_source" if models_only else "resume_source")
+    root = Path(destination_scratch or plan["scratch"]) / ("merge_source" if models_only else "resume_source")
     names = [name for name in receipt["files"] if not models_only or
              (name.startswith("actor/") and not any(t in name for t in ("optim_world", "extra_state_world")))]
     snapshot_download(repo_id=receipt["repo_id"], revision=receipt["remote_commit"], local_dir=root,
@@ -451,6 +486,32 @@ def restore_checkpoint(plan, step, *, models_only=False):
         if digest(checkpoint / name) != receipt["files"][name]["sha256"]:
             raise ValueError("Restored checkpoint hash mismatch")
     return checkpoint
+
+
+def training_resume(plan):
+    """Prefer this stage's recovery checkpoint, otherwise resume the pinned prior epoch."""
+    archived = [step for step in plan["checkpoint_steps"] if archive_receipt(plan, step)]
+    if archived:
+        step = max(archived)
+        return step, restore_checkpoint(plan, step)
+    continuation = plan.get("continuation")
+    if continuation is None:
+        return 0, None
+    dependency = plan["predecessor"]
+    path = Path(dependency["root"]) / "plan.json"
+    if digest(path) != dependency["plan_sha256"]:
+        raise ValueError("Continuation predecessor plan identity changed")
+    predecessor = read(path)
+    step = continuation["step"]
+    receipt = archive_receipt(predecessor, step)
+    if receipt is None or receipt["repo_id"] != continuation["checkpoint_repo"]:
+        raise ValueError("No verified full predecessor checkpoint for continuation")
+    checkpoint = restore_checkpoint(predecessor, step, destination_scratch=plan["scratch"])
+    record = {"state": "verified", "predecessor": dependency, "step": step,
+              "path": str(checkpoint), "receipt": receipt}
+    if not persist(plan, "continuation_checkpoint.json", record):
+        raise OSError(errno.ENOSPC, "Cannot preserve continuation checkpoint receipt")
+    return step, checkpoint
 
 
 def train_entry(plan, attempt):
@@ -483,10 +544,10 @@ def train(plan):
             return
         attempt = previous.get("attempt", 0) + 1
         config = OmegaConf.load(plan["config_path"])
-        resume_step = max(archived, default=0)
+        resume_step, resume_path = training_resume(plan)
         if resume_step:
             config.trainer.resume_mode = "resume_path"
-            config.trainer.resume_from_path = str(restore_checkpoint(plan, resume_step))
+            config.trainer.resume_from_path = str(resume_path)
         attempts = Path(plan["scratch"]) / "attempts"
         attempts.mkdir(exist_ok=True)
         OmegaConf.save(config, attempts / f"attempt_{attempt}.yaml", resolve=True)
@@ -516,7 +577,7 @@ def final_model(plan):
             if digest(Path(old["path"]) / name) != checksum:
                 raise ValueError("Final model changed")
         return old
-    checkpoint = restore_checkpoint(plan, 100, models_only=True)
+    checkpoint = restore_checkpoint(plan, plan["total_steps"], models_only=True)
     destination = Path(plan["scratch"]) / "final_model"
     subprocess.run([plan["python_bin"], "-m", "verl.model_merger", "merge", "--backend", "fsdp",
                     "--local_dir", str(checkpoint / "actor"), "--target_dir", str(destination)],
@@ -617,7 +678,7 @@ def queue(plan):
                     persist(plan, "queue_status.json", {"state": "training", "pid": os.getpid()})
                     wait_child(plan, "train")
                     continue
-                if archive_receipt(plan, 100) is None:
+                if archive_receipt(plan, plan["total_steps"]) is None:
                     persist(plan, "queue_status.json", {"state": "waiting_for_final_upload", "pid": os.getpid()})
                     time.sleep(5)
                     continue
@@ -789,6 +850,8 @@ def main():
     parser.add_argument("--n", type=int, help="Responses per prompt; defaults to 8 for GRPO, 16 for MaxRL")
     parser.add_argument("--cost-offset-tokens", type=float, default=256.0)
     parser.add_argument("--after-root", type=Path, help="Wait for this frozen run and all four evaluations")
+    parser.add_argument("--continue-from-predecessor", action="store_true",
+                        help="Restore the predecessor's full final GRPO checkpoint and train one more epoch")
     parser.add_argument("--dataset", choices=list(evaluation.COUNTS))
     parser.add_argument("--rank", type=int)
     parser.add_argument("--attempt", type=int)

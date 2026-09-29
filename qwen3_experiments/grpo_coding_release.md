@@ -132,3 +132,25 @@ metrics, upload receipts, and other runs remain available. Interrupted cleanup
 can resume after verifying every remaining file against its uploaded hash.
 
 See `maxrl_verl091.md` for the migrated advantage estimators and CPU checks.
+
+## Continue GRPO for another epoch
+
+Prepare a separate run with `--after-root "$GRPO_RUN_DIR" --continue-from-predecessor`
+and its own root, scratch directory, experiment name, and public HF prefix.
+The predecessor's training, four holdouts, and rollout uploads finish first.
+Continuation requires the same dataset, initialization, grading rules, N, batch
+size, sampling settings, and shuffle seed, plus a complete predecessor epoch.
+
+The second run restores the verified full step-100 checkpoint into its own
+scratch directory, including optimizer, scheduler/RNG, and dataloader state.
+It runs steps 101–200 with `total_epochs=2` and `total_training_steps=200`.
+The V1 loader retains sampler state and moves into a newly shuffled second
+epoch; it does not restart epoch one's row order. The constant learning-rate
+schedule remains unchanged. A separate W&B run records the continued global
+step numbers and the same training accuracy bins.
+
+Only this stage's checkpoints (110, 120, …, 200) and rollout shards (101–200)
+are counted toward completion and uploaded to its own public repositories.
+Recovery prefers the latest checkpoint from this second stage; a missing
+predecessor checkpoint raises an error instead of starting from base weights.
+The final model and all four holdouts use step 200.
