@@ -1,4 +1,4 @@
-"""Compute-only veRL 0.9.1 GRPO, verified uploads, recovery, and four holdouts."""
+"""Compute-only veRL 0.9.1 coding RL, verified uploads, recovery, and four holdouts."""
 
 import argparse
 import errno
@@ -149,6 +149,10 @@ def prepare(args):
 
     node = require_compute(args.job_id)
     versions = assert_versions()
+    algorithm = args.algorithm
+    rollout_n = args.n if args.n is not None else (8 if algorithm == "grpo" else 16)
+    if rollout_n < 2:
+        raise ValueError("Grouped coding RL requires N >= 2")
     root, scratch = args.root.absolute(), args.scratch.absolute()
     if (root / "plan.json").exists():
         raise ValueError("Run is already prepared; use its frozen plan")
@@ -207,17 +211,26 @@ def prepare(args):
         "checkpoint_dir": str(scratch / "checkpoints"), "checkpoint_steps": list(range(10, 101, 10)),
         "hf_repo_prefix": args.hf_prefix, "hf_account": account, "public": True,
         "hf_token_path": hf_constants.HF_TOKEN_PATH,
-        "holder_locks": baseline["holder_locks"], "total_steps": 100, "expected_rollouts_per_step": 256,
+        "holder_locks": baseline["holder_locks"], "total_steps": 100, "expected_rollouts_per_step": 32 * rollout_n,
         "wandb_id": hashlib.sha256(str(root).encode()).hexdigest()[:8], "experiment_name": args.experiment_name,
         "sampling": {"n": 1, "temperature": 0.6, "top_p": 0.95, "top_k": 20, "max_tokens": 32768,
                      "ignore_eos": False, "skip_special_tokens": True},
         "runtime_files": runtime_hashes, "source_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=source, text=True).strip(),
-        "training": {"batch_size": 32, "n": 8, "max_num_seqs": 16, "temperature": 1.0,
+        "training": {"algorithm": algorithm, "batch_size": 32, "n": rollout_n,
+                     "max_num_seqs": 16, "temperature": 1.0,
                      "top_p": 1.0, "top_k": -1, "shuffle": True, "seed": 42, "epochs": 1},
         "grading": {"name": "livecodebench", "check_eos": False, "score_after_thinking": True,
                     "unit_test_timeout_seconds": 10, "binary": True, "workers": 128},
     }
+    if args.after_root is not None:
+        predecessor_path = args.after_root.absolute() / "plan.json"
+        predecessor = read(predecessor_path)
+        if predecessor["job_id"] != plan["job_id"] or predecessor["node"] != node:
+            raise ValueError("Predecessor must belong to the same compute allocation")
+        if predecessor["output_root"] == plan["output_root"]:
+            raise ValueError("A run cannot depend on itself")
+        plan["predecessor"] = {"root": predecessor["output_root"], "plan_sha256": digest(predecessor_path)}
     plan["holdouts"] = evaluation.prepare_holdouts(plan, args.baseline_root, args.competition_root)
     max_prompt = max(v["max_prompt_tokens"] for v in plan["holdouts"].values())
     plan["evaluation_engine"] = {
@@ -234,13 +247,18 @@ def prepare(args):
     config = OmegaConf.merge(config, OmegaConf.load(runtime / "qwen3_experiments/grpo_verl091_benchmark.yaml"),
                             OmegaConf.load(runtime / "qwen3_experiments/grpo_verl091_training.yaml"))
     overrides = {
+        "algorithm.adv_estimator": algorithm,
+        "algorithm.norm_adv_by_std_in_grpo": algorithm == "grpo",
+        "algorithm.cost_offset_tokens": args.cost_offset_tokens,
+        "algorithm.f_cov_num_prompts": 32 if algorithm == "f_cov" else None,
+        "actor_rollout_ref.rollout.n": rollout_n,
         "data.train_files": str(data), "data.val_files": str(validation),
         "actor_rollout_ref.model.path": str(model),
         "reward.custom_reward_function.path": str(runtime / "qwen3_experiments/lcb_verl_reward.py"),
         "reward.custom_reward_function.reward_kwargs.grading_plan": str(grading_plan),
         "trainer.default_local_dir": plan["checkpoint_dir"], "trainer.rollout_data_dir": str(scratch / "rollouts"),
         "trainer.experiment_name": args.experiment_name,
-        "ray_kwargs.ray_init._temp_dir": f"/tmp/gcr091_{args.job_id}",
+        "ray_kwargs.ray_init._temp_dir": f"/tmp/cr_{plan['wandb_id']}",
         "actor_rollout_ref.rollout.agent.custom_async_server.path":
             str(runtime / "qwen3_experiments/grpo_release_server.py"),
         "actor_rollout_ref.rollout.agent.custom_async_server.name": "BenchmarkvLLMHttpServer",
@@ -252,6 +270,9 @@ def prepare(args):
     }
     for key, value in overrides.items():
         OmegaConf.update(config, key, value, force_add=True)
+    from verl.trainer.ppo.maxrl_algos import validate_maxrl_training_config
+
+    validate_maxrl_training_config(config)
     tokenizer = AutoTokenizer.from_pretrained(model)
     dataset = RLHFDataset([str(data)], tokenizer, config.data)
     if len(dataset) != 3200:
@@ -444,7 +465,10 @@ def train_entry(plan, attempt):
 def train(plan):
     from omegaconf import OmegaConf
 
+    if not predecessor_complete(plan):
+        raise RuntimeError("Predecessor training and all four evaluations must finish first")
     with gpu_guard(plan):
+        cleanup_predecessor_checkpoints(plan)
         if shutil.disk_usage(plan["scratch"]).free < 100 << 30:
             raise RuntimeError("Need at least 100 GiB of local disk before training")
         previous = state(plan, "training_exit.json")
@@ -516,7 +540,7 @@ def launch(plan, action, *, slurm=False, dataset=None, rank=None):
     if slurm:
         command = ["srun", f"--jobid={plan['job_id']}", "--overlap", "--nodes=1", "--ntasks=1",
                    f"--nodelist={plan['node']}", "--cpus-per-task=192", "--gres=gpu:8", "--kill-on-bad-exit=1",
-                   "--job-name=coding-grpo-verl091", *command]
+                   f"--job-name=coding-{plan['training'].get('algorithm', 'grpo')}-verl091", *command]
     path = Path(plan["scratch"]) / "logs" / f"{action}_{dataset or 'control'}_{rank}.log"
     with path.open("ab", buffering=0) as log:
         child = subprocess.Popen(command, cwd=plan["runtime"], env=environment(plan, gpu=rank),
@@ -618,11 +642,99 @@ def queue(plan):
                 time.sleep(30)
 
 
+def predecessor_complete(plan):
+    """Gate successors on the pinned predecessor's entire queue, not training exit."""
+    dependency = plan.get("predecessor")
+    if dependency is None:
+        return True
+    path = Path(dependency["root"]) / "plan.json"
+    if digest(path) != dependency["plan_sha256"]:
+        raise ValueError("Predecessor plan identity changed")
+    predecessor = read(path)
+    if predecessor["job_id"] != plan["job_id"] or predecessor["node"] != plan["node"]:
+        raise ValueError("Predecessor compute allocation changed")
+    if state(predecessor, "queue_status.json").get("state") != "complete":
+        return False
+    if state(predecessor, "training_exit.json").get("exit_code") != 0:
+        return False
+    if state(predecessor, "rollout_status.json").get("state") != "complete":
+        return False
+    for dataset, count in evaluation.COUNTS.items():
+        audit = state(predecessor, f"evaluation/{dataset}/audit.json")
+        if not (audit.get("complete") and audit.get("plan_sha256") == dependency["plan_sha256"]
+                and audit.get("questions") == count):
+            return False
+    return True
+
+
+def delete_verified_model_tree(directory, hashes):
+    """Delete only remaining files matching a durable, verified Hub receipt."""
+    directory = Path(directory)
+    if directory.is_symlink():
+        raise ValueError("Refusing redirected model cleanup")
+    if not directory.exists():
+        return
+    for path in directory.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("Refusing model-cache symlink")
+        relative = path.relative_to(directory)
+        if not path.is_file() or ".cache" in relative.parts:
+            continue
+        if digest(path) != hashes.get(relative.as_posix()):
+            raise ValueError(f"Model cache changed; retaining {path}")
+    shutil.rmtree(directory)
+
+
+def cleanup_predecessor_checkpoints(plan):
+    """Called under the allocation GPU lock after every predecessor eval finished."""
+    if not plan.get("predecessor") or state(plan, "predecessor_cleanup.json").get("state") == "complete":
+        return
+    if not predecessor_complete(plan):
+        raise RuntimeError("Predecessor evaluations are incomplete; cannot clean its models")
+    predecessor = read(Path(plan["predecessor"]["root"]) / "plan.json")
+    if alive(predecessor, "train") or any(alive(predecessor, "evaluate", name) for name in evaluation.COUNTS):
+        raise RuntimeError("Predecessor GPU stage has not exited yet")
+    scratch = Path(predecessor["scratch"])
+    final = state(predecessor, "final_model.json")
+    if (final.get("path") != str(scratch / "final_model")
+            or final.get("repo") != predecessor["hf_repo_prefix"] + "-final"
+            or not final.get("revision") or not final.get("files_sha256")):
+        raise ValueError("No verified public final-model receipt for predecessor cleanup")
+    targets = [(scratch / "final_model", final["files_sha256"])]
+    receipts = {"final_model": final}
+    for name in ("checkpoints", "resume_source", "merge_source"):
+        parent = scratch / name
+        if parent.is_symlink():
+            raise ValueError("Refusing redirected checkpoint-cache cleanup")
+        for path in sorted(parent.glob("global_step_*")):
+            step = int(path.name.removeprefix("global_step_"))
+            receipt = archive_receipt(predecessor, step)
+            if receipt is None:
+                raise ValueError(f"Checkpoint has no verified upload: {path}")
+            targets.append((path, {key: value["sha256"] for key, value in receipt["files"].items()}))
+            receipts[path.relative_to(scratch).as_posix()] = receipt
+    record = {"predecessor": plan["predecessor"], "paths": [str(path) for path, _ in targets],
+              "verified_uploads": receipts}
+    if not persist(plan, "predecessor_cleanup.json", {**record, "state": "verified"}):
+        raise OSError(errno.ENOSPC, "Cannot preserve predecessor cleanup receipts")
+    for path, hashes in targets:
+        delete_verified_model_tree(path, hashes)
+    if not persist(plan, "predecessor_cleanup.json", {**record, "state": "complete"}):
+        raise OSError(errno.ENOSPC, "Cannot preserve predecessor cleanup completion")
+
+
 def supervise(plan):
     with lock_file(Path(plan["scratch"]) / "guard/supervisor.lock"):
         children = {}
         while True:
             try:
+                if not predecessor_complete(plan):
+                    waiting = {"state": "waiting_for_predecessor", "pid": os.getpid(),
+                               "predecessor": plan["predecessor"], "node": socket.gethostname()}
+                    persist(plan, "supervisor_status.json", waiting)
+                    persist(plan, "queue_status.json", waiting)
+                    time.sleep(15)
+                    continue
                 if state(plan, "queue_status.json").get("state") == "complete":
                     persist(plan, "supervisor_status.json", {"state": "complete", "pid": os.getpid()})
                     return
@@ -671,6 +783,12 @@ def main():
     parser.add_argument("--competition-root", type=Path)
     parser.add_argument("--hf-prefix")
     parser.add_argument("--experiment-name")
+    parser.add_argument("--algorithm", default="grpo", choices=[
+        "grpo", "maxrl", "fixed_n_rb_offset_cost_aware_marginrl", "f_cov",
+    ])
+    parser.add_argument("--n", type=int, help="Responses per prompt; defaults to 8 for GRPO, 16 for MaxRL")
+    parser.add_argument("--cost-offset-tokens", type=float, default=256.0)
+    parser.add_argument("--after-root", type=Path, help="Wait for this frozen run and all four evaluations")
     parser.add_argument("--dataset", choices=list(evaluation.COUNTS))
     parser.add_argument("--rank", type=int)
     parser.add_argument("--attempt", type=int)

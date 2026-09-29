@@ -1,4 +1,4 @@
-# Full coding GRPO on veRL 0.9.1
+# Full coding GRPO and MaxRL on veRL 0.9.1
 
 New coding training and evaluation use `maxrl-code-verl091`: veRL 0.9.1,
 vLLM 0.24.0, PyTorch 2.11/CUDA 13, and Python 3.12. The environment currently
@@ -35,7 +35,7 @@ by `grpo_Qwen3-1.7B_Polaris-1-8-3200_bs32_n16_32k_1epoch`:
 - `train_all_datasets_binning/fraction_of_prompts_in_<interval>`
 - `train_binning_for_dataset_<data_source>/fraction_of_prompts_in_<interval>`
 
-Each prompt contributes one mean accuracy over its eight binary rewards.
+Each prompt contributes one mean accuracy over its N binary rewards.
 The original 13 intervals are preserved: exact zero, powers-of-two boundaries
 from 1/1024 through 1/2, the open interval (0.5, 1.0), and exact one. Empty
 intervals are logged as zero. Prompt identity survives batch reordering, padding
@@ -91,7 +91,7 @@ every remote file size and hash, writes a durable receipt, and deletes the local
 checkpoint. A failed upload retains local data. Training recovery restores the
 latest verified model, optimizer, RNG, and dataloader state.
 
-Completed 256-row rollout JSONL files are compressed, publicly uploaded, hash
+Completed rollout JSONL files (256 rows for GRPO N=8; 512 for MaxRL N=16) are compressed, publicly uploaded, hash
 verified, and deleted locally. Immutable commit IDs and original-file hashes
 remain in receipts. Failed-attempt rollouts at a repeated step can be superseded
 on the dataset's current branch, with earlier versions retained in Hub history.
@@ -120,3 +120,15 @@ PYTHONPATH="$GRPO_SCRATCH/runtime" "$MAXRL_CODE_PYTHON" \
 The supervisor must be detached from the login connection by the compute-node
 launcher. `HF_TOKEN_PATH` should point to the existing authorized credential
 file during preparation; only that path, not its secret contents, is recorded.
+
+For original MaxRL, add `--algorithm maxrl --n 16` at preparation and choose a
+separate root, scratch directory, experiment name, and public HF prefix. Add
+`--after-root "$GRPO_RUN_DIR"` to queue it after the entire GRPO pipeline.
+Its supervisor can start immediately: it waits for the pinned predecessor's
+training, all four evaluation audits, and rollout archives before launching any
+GPU work. It then removes the predecessor's verified uploaded final model and
+remaining checkpoint copies under the allocation GPU lock. Evaluation responses,
+metrics, upload receipts, and other runs remain available. Interrupted cleanup
+can resume after verifying every remaining file against its uploaded hash.
+
+See `maxrl_verl091.md` for the migrated advantage estimators and CPU checks.
