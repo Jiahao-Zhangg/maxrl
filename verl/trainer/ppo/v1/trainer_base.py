@@ -51,6 +51,7 @@ from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.checkpoint_callback import build_checkpoint_callback
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.maxrl_algos import validate_maxrl_training_config
 from verl.trainer.ppo.metric_utils import (
     RolloutMoELoadBalanceMetricsAccumulator,
     compute_data_metrics,
@@ -133,6 +134,7 @@ class PPOTrainer(ABC):
 
     def __init__(self, config: DictConfig):
         self.config = config
+        validate_maxrl_training_config(config)
         self.checkpoint_callback = build_checkpoint_callback(config)
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
@@ -1796,7 +1798,11 @@ class PPOTrainer(ABC):
             num_repeat=self.config.actor_rollout_ref.rollout.n,
             norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
             config=self.config.algorithm,
+            padding_mask=[tag.get("is_padding", False) for tag in batch.tags],
         )
+
+        for key in ("fixed_n_rb_marginrl_metrics", "f_cov_metrics"):
+            metrics.update(data.meta_info.get(key, {}))
 
         # 4. write nested advantages and returns back to TransferQueue
         fields = ["advantages", "returns"]

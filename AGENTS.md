@@ -10,6 +10,7 @@
 - Use `maxrl-code-verl091` for new training and evaluation: veRL 0.9.1 and vLLM 0.24.0.
 - Run controllers, training, checkpoint uploads and evaluation on the assigned compute node, using frozen runtime copies.
 - Coding GRPO defaults to the cleaned 3,200-row Nemotron/LeetCode dataset, batch 32, N=8, concurrency 16, thinking on, and 32k output tokens. Training sampling is 1/1/-1; evaluation is 0.6/0.95/20.
+- Coding MaxRL uses the same dataset and settings with N=16. The release trainer supports `maxrl`, `fixed_n_rb_offset_cost_aware_marginrl` (L+L_0), and `f_cov`; use the release launcher, not historical Math12K shell launchers. Keep fixed complete prompt groups and synchronous updates; compute f_cov statistics on the full prompt batch.
 - Use the shared pinned LiveCodeBench grader for coding training and evaluation, binary reward, after-thinking code only, no EOS requirement. Log Polaris-compatible training accuracy bins globally and per data source.
 - Save every 10 steps, verify public Hub uploads before deleting local checkpoints and completed rollout files, and preserve receipts for recovery.
 

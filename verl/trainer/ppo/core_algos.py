@@ -30,6 +30,7 @@ from omegaconf import DictConfig
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
+from verl.trainer.ppo import maxrl_algos
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
@@ -96,6 +97,10 @@ class AdvantageEstimator(str, Enum):
 
     GAE = "gae"
     GRPO = "grpo"
+    MAXRL = "maxrl"
+    FIXED_N_RB_COST_AWARE_MARGINRL = "fixed_n_rb_cost_aware_marginrl"
+    FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL = "fixed_n_rb_offset_cost_aware_marginrl"
+    F_COV = "f_cov"
     REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     REMAX = "remax"
@@ -132,6 +137,21 @@ def register_adv_est(name_or_enum: str | AdvantageEstimator) -> Any:
         return fn
 
     return decorator
+
+
+compute_maxrl_outcome_advantage = register_adv_est(AdvantageEstimator.MAXRL)(
+    maxrl_algos.compute_maxrl_outcome_advantage
+)
+compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage = register_adv_est(
+    AdvantageEstimator.FIXED_N_RB_COST_AWARE_MARGINRL
+)(maxrl_algos.compute_fixed_n_rb_cost_aware_marginrl_outcome_advantage)
+compute_fixed_n_rb_offset_cost_aware_marginrl_outcome_advantage = register_adv_est(
+    AdvantageEstimator.FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL
+)(maxrl_algos.compute_fixed_n_rb_offset_cost_aware_marginrl_outcome_advantage)
+compute_cross_context_f_cov_outcome_advantage = register_adv_est(AdvantageEstimator.F_COV)(
+    maxrl_algos.compute_cross_context_f_cov_outcome_advantage
+)
+compute_fixed_n_rb_offset_marginrl_costs = maxrl_algos.compute_fixed_n_rb_offset_marginrl_costs
 
 
 def get_adv_estimator_fn(name_or_enum):

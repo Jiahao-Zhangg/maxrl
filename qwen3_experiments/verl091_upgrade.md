@@ -4,9 +4,11 @@ This branch updates the upstream veRL source and dependency metadata to release
 `v0.9.1`, commit `1876b06d0a3e4e71e06230be10af14492ca8a75b`.
 The complete project state before the update is commit `d8a375d`.
 Project experiment files and modules that are absent from upstream are retained.
-Upstream trainer and algorithm files follow the release; historical custom
-MaxRL trainer/advantage changes are preserved in the parent commit and are not
-automatically ported to the new trainer. This experiment validates GRPO.
+Upstream trainer and algorithm files follow the release. Original MaxRL,
+per-context RB with L+L_0 costs, and f_cov are now explicitly ported to its V1
+trainer; see `maxrl_verl091.md` for scope, formulas, and validation. Other historical
+customizations remain preserved in the parent commit. The benchmark below
+validates GRPO; it is not a GPU benchmark of the migrated algorithms.
 
 The official `uv.lock` selects vLLM 0.24.0, PyTorch 2.11.0/CUDA 13.0,
 Transformers 5.9.0, and Python 3.12. An independent environment is required.

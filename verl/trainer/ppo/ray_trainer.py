@@ -41,6 +41,11 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.maxrl_algos import MAXRL_ESTIMATORS
+from verl.trainer.ppo.maxrl_metrics import (
+    compute_cross_context_f_cov_metrics,
+    compute_fixed_n_rb_cost_aware_marginrl_metrics,
+)
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -192,6 +197,7 @@ def compute_advantage(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    multi_turn: bool = False,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -243,6 +249,39 @@ def compute_advantage(
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+    elif adv_estimator in MAXRL_ESTIMATORS:
+        # Compute once on the controller before actor microbatching. The cost
+        # mask retains all response tokens even if the loss selects fewer.
+        calculation_mask = data.batch["response_mask"]
+        if multi_turn:
+            calculation_mask = data.batch["loss_mask"][:, -calculation_mask.size(1):]
+        kwargs = dict(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=calculation_mask,
+            index=data.non_tensor_batch["uid"],
+            expected_group_size=num_repeat,
+            config=config,
+        )
+        estimator = core_algos.get_adv_estimator_fn(adv_estimator)
+        if adv_estimator == AdvantageEstimator.MAXRL:
+            advantages, returns = estimator(**kwargs)
+        else:
+            advantages, returns, diagnostics = estimator(
+                **kwargs, trajectory_cost_mask=data.batch["response_mask"], return_diagnostics=True
+            )
+            if adv_estimator == AdvantageEstimator.F_COV:
+                data.meta_info["f_cov_metrics"] = compute_cross_context_f_cov_metrics(**diagnostics)
+            else:
+                prefix = (
+                    "fixed_n_rb_offset_marginrl"
+                    if adv_estimator == AdvantageEstimator.FIXED_N_RB_OFFSET_COST_AWARE_MARGINRL
+                    else "fixed_n_rb_marginrl"
+                )
+                data.meta_info["fixed_n_rb_marginrl_metrics"] = compute_fixed_n_rb_cost_aware_marginrl_metrics(
+                    **diagnostics, metric_prefix=prefix
+                )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     else:

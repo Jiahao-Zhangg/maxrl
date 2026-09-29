@@ -656,6 +656,10 @@ class AlgoConfig(BaseConfig):
     lam: float = 1.0
     adv_estimator: str = "gae"
     norm_adv_by_std_in_grpo: bool = True
+    # Cost of a trajectory is its full response length plus L_0.
+    cost_offset_tokens: float = 256.0
+    # Filled from data.train_batch_size by the V1 trainer for f_cov.
+    f_cov_num_prompts: Optional[int] = None
     use_kl_in_reward: bool = False
     kl_penalty: str = "kl"
     kl_ctrl: KLControlConfig = field(default_factory=KLControlConfig)

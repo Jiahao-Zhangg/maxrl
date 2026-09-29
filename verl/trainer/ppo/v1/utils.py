@@ -19,6 +19,7 @@ import torch
 
 from verl.protocol import DataProto
 from verl.trainer.ppo import core_algos
+from verl.trainer.ppo.maxrl_algos import MAXRL_ESTIMATORS
 from verl.trainer.ppo.ray_trainer import compute_advantage
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY
 
@@ -154,6 +155,7 @@ def compute_advantage_for_multi_trajectories(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Any = None,
+    padding_mask: list[bool] | None = None,
 ) -> DataProto:
     """Compute GRPO advantages from each session's final output. For non-GRPO
     estimators, such as GAE, are delegated to the original compute_advantage() unchanged.
@@ -161,9 +163,40 @@ def compute_advantage_for_multi_trajectories(
     For GRPO, only the final output in each ``{uid}_{session_id}`` group participates
     in advantage computation, and the result is broadcast to the other outputs in
     the same session. Sessions whose AgentLoop returns ``None`` simply do not appear
-    in ``batch_keys``. Non-GRPO estimators, such as GAE, are delegated to the
-    original ``compute_advantage()`` unchanged.
+    in ``batch_keys``. The fixed-N MaxRL family excludes padding and validates
+    single-output sessions before dispatch. Other estimators, such as GAE, are
+    delegated to the original ``compute_advantage()`` unchanged.
     """
+    if adv_estimator in MAXRL_ESTIMATORS:
+        # Balance/padding runs before advantage calculation in V1. Dummy rows
+        # must never enter prompt means or f_cov's cross-context statistics.
+        if len(batch_keys) != len(data):
+            raise ValueError("MaxRL requires one trajectory key per row")
+        padding = np.zeros(len(data), dtype=bool) if padding_mask is None else np.asarray(padding_mask, dtype=bool)
+        if padding.shape != (len(data),):
+            raise ValueError("MaxRL padding mask must have one entry per row")
+        indices = np.flatnonzero(~padding)
+        if not len(indices):
+            raise ValueError("MaxRL requires a nonempty rollout batch")
+        sessions = set()
+        for row in indices:
+            fields = batch_keys[row].rsplit("_", 2)
+            if len(fields) != 3:
+                raise ValueError(f"Unexpected MaxRL trajectory key: {batch_keys[row]}")
+            session = tuple(fields[:2])
+            if session in sessions:
+                raise ValueError("MaxRL variants require a single output per rollout session")
+            sessions.add(session)
+        real = compute_advantage(
+            data[indices], adv_estimator=adv_estimator, gamma=gamma, lam=lam,
+            num_repeat=num_repeat, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, config=config,
+        )
+        for field in ("advantages", "returns"):
+            output = torch.zeros_like(data.batch["token_level_rewards"])
+            output[indices] = real.batch[field]
+            data.batch[field] = output
+        data.meta_info.update(real.meta_info)
+        return data
     if adv_estimator != core_algos.AdvantageEstimator.GRPO:
         return compute_advantage(
             data,

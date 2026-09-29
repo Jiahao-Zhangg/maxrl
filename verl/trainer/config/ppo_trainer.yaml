@@ -80,6 +80,12 @@ algorithm:
   # Whether to normalize advantages by std (specific to GRPO)
   norm_adv_by_std_in_grpo: True
 
+  # Per-context RB and f_cov trajectory cost: full response tokens + L_0.
+  cost_offset_tokens: 256.0
+
+  # f_cov must use the complete prompt batch; V1 infers this when null.
+  f_cov_num_prompts: null
+
   # Group filtering configuration used by DAPO and entropy-based sampling
   filter_groups:
 
