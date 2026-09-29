@@ -27,6 +27,10 @@ ENV/
 **/checkpoints/
 **/ckpt-*/
 
+# These are veRL source and configuration directories, not model/data artifacts.
+!/verl/models/
+!/verl/trainer/config/data/
+
 # Training outputs
 outputs/
 wandb/
