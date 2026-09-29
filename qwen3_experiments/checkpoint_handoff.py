@@ -123,7 +123,8 @@ def upload_verified_checkpoint(config, api):
     }
     manifest = {name: file_fingerprint(source) for name, source in sources.items()}
     repo_id = config["hf_repo_id"]
-    api.create_repo(repo_id=repo_id, repo_type="model", private=config.get("hf_private", True), exist_ok=True)
+    private = config.get("hf_private", False)
+    api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
     info = api.repo_info(repo_id=repo_id, repo_type="model", files_metadata=True)
     for remote in info.siblings:
         if remote.rfilename == ".gitattributes":
@@ -131,6 +132,10 @@ def upload_verified_checkpoint(config, api):
         expected = manifest.get(remote.rfilename)
         if expected is None or not remote_file_matches(remote, expected):
             raise SafetyError(f"Refusing to overwrite conflicting HF content: {remote.rfilename}")
+    if not private and info.private:
+        api.update_repo_settings(repo_id=repo_id, repo_type="model", private=False)
+        if api.repo_info(repo_id=repo_id, repo_type="model").private:
+            raise RuntimeError(f"Expected a public checkpoint repository: {repo_id}")
     operations = [CommitOperationAdd(path_in_repo=name, path_or_fileobj=source) for name, source in sources.items()]
     commit = api.create_commit(
         repo_id=repo_id,

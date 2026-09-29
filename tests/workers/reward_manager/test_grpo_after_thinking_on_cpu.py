@@ -82,6 +82,23 @@ def test_eos_at_token_limit_remains_eligible(grader):
     assert manager(data_for([[WRONG, CLOSE, CORRECT, EOS]])).sum().item() == 1
 
 
+def test_after_thinking_grading_without_eos_check_accepts_token_limit_answers(grader):
+    rows = [
+        [WRONG, CLOSE, CORRECT],  # Correct final answer at the limit, without EOS.
+        [CORRECT, CLOSE, WRONG],  # A correct thought cannot rescue the final answer.
+        [CORRECT],  # Missing </think>.
+        [CLOSE, SPACE],  # Empty final answer.
+        [CLOSE, OPEN, CORRECT],  # Reopened thinking remains ineligible.
+        [CLOSE, CORRECT, EOS],
+    ]
+    manager = module.MultiThreadNaiveRewardManager(Tokenizer(), 0, num_reward_actors=1, batch_size=2,
+                                                  check_eos=False, score_after_thinking=True, max_resp_len=3)
+    result = manager(data_for(rows), return_dict=True)
+    assert result["reward_tensor"].sum(dim=-1).tolist() == [1, 0, 0, 0, 0, 1]
+    assert [(i, text) for i, text, _ in grader] == [(0, r"\boxed{1}"), (1, r"\boxed{2}"), (5, r"\boxed{1}")]
+    assert "zeroed_by_missing_eos" not in result["reward_extra_info"]
+
+
 def test_old_defaults_still_grade_without_thinking_or_eos(grader):
     manager = module.MultiThreadNaiveRewardManager(Tokenizer(), 0, num_reward_actors=1)
     assert manager(data_for([[CORRECT]])).sum().item() == 1

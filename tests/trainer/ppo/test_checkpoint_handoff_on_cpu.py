@@ -62,9 +62,17 @@ class FakeApi:
         self.commits = []
         self.fail_upload = False
         self.corrupt_remote = False
+        self.private = None
+        self.visibility_updates = []
 
     def create_repo(self, **kwargs):
         self.created.append(kwargs)
+        if self.private is None:
+            self.private = kwargs["private"]
+
+    def update_repo_settings(self, **kwargs):
+        self.visibility_updates.append(kwargs)
+        self.private = kwargs["private"]
 
     def create_commit(self, **kwargs):
         if self.fail_upload:
@@ -83,7 +91,7 @@ class FakeApi:
     def repo_info(self, **kwargs):
         if self.corrupt_remote and self.files:
             next(iter(self.files.values())).lfs.sha256 = "wrong"
-        return SimpleNamespace(sha="verified-revision", siblings=list(self.files.values()))
+        return SimpleNamespace(sha="verified-revision", siblings=list(self.files.values()), private=self.private)
 
 
 def holder(config, job_id, state="RUNNING", start="2026-09-10T01:00:00"):
@@ -145,6 +153,30 @@ def test_upload_checks_content_and_keeps_local_resume_files(config):
     assert "latest_checkpointed_iteration.txt" in receipt["manifest"]
     assert api.created[0]["private"] is True
     assert all(name.startswith("global_step_150/") or name in {"wandb_id.txt", "latest_checkpointed_iteration.txt"} for name in receipt["manifest"])
+
+
+@pytest.mark.parametrize("existing_private", [None, True])
+def test_checkpoint_upload_defaults_public_and_converts_existing_private_repo(config, existing_private):
+    config.pop("hf_private")
+    checkpoint = make_checkpoint(config)
+    api = FakeApi()
+    api.private = existing_private
+    upload_verified_checkpoint(config, api)
+    assert api.created[0]["private"] is False
+    assert api.private is False
+    assert bool(api.visibility_updates) == (existing_private is True)
+    assert checkpoint.is_dir()
+
+
+def test_failed_visibility_change_prevents_checkpoint_upload(config, monkeypatch):
+    config.pop("hf_private")
+    checkpoint = make_checkpoint(config)
+    api = FakeApi()
+    api.private = True
+    monkeypatch.setattr(api, "update_repo_settings", lambda **kwargs: None)
+    with pytest.raises(RuntimeError, match="Expected a public checkpoint repository"):
+        upload_verified_checkpoint(config, api)
+    assert api.commits == [] and checkpoint.is_dir()
 
 
 def test_same_size_corruption_fails_verification_and_never_cancels(config):

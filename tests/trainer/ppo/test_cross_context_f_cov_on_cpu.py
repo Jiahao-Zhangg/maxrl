@@ -36,8 +36,8 @@ def reference(lengths, rewards, uids, offset=256):
     return torch.tensor(advantages), h, mean_cost
 
 
-def test_exact_k256_n16_formula_with_noncontiguous_prompt_groups():
-    k, n = 256, 16
+@pytest.mark.parametrize("k,n,offset", [(256, 16, 256), (32, 16, 0)])
+def test_exact_formula_with_noncontiguous_prompt_groups(k, n, offset):
     lengths = [(prompt * 7 + response * 3) % 40 + 1 for prompt in range(k) for response in range(n)]
     rewards = [int(response < prompt % (n + 1)) for prompt in range(k) for response in range(n)]
     uids = [f"prompt-{prompt}" for prompt in range(k) for _ in range(n)]
@@ -46,10 +46,10 @@ def test_exact_k256_n16_formula_with_noncontiguous_prompt_groups():
     mask, token_rewards = make_batch(lengths, rewards)
     advantages, returns, diagnostics = get_adv_estimator_fn("f_cov")(
         token_rewards.requires_grad_(), mask.float().requires_grad_(), np.array(uids),
-        expected_group_size=n, config={"cost_offset_tokens": 256, "f_cov_num_prompts": k},
+        expected_group_size=n, config={"cost_offset_tokens": offset, "f_cov_num_prompts": k},
         return_diagnostics=True,
     )
-    expected, h, mean_cost = reference(lengths, rewards, uids)
+    expected, h, mean_cost = reference(lengths, rewards, uids, offset)
     torch.testing.assert_close(advantages, expected.unsqueeze(-1) * mask)
     torch.testing.assert_close(returns, advantages)
     torch.testing.assert_close(diagnostics["optimizer_trajectory_advantages"], expected)

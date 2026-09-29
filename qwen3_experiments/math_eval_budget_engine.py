@@ -36,7 +36,8 @@ def evaluate_point(*, protocol, budget, seed, rows, prompt_token_ids, engine,
         parameters = [sampling_params_type(
             n=1, temperature=sampling["temperature"], top_p=sampling["top_p"],
             top_k=sampling["top_k"], max_tokens=request[2], ignore_eos=False,
-            detokenize=False, seed=rollout_seed(seed, request[0], request[1]),
+            detokenize=False,
+            seed=rollout_seed(seed, rows[request[0]].get("seed_position", request[0]), request[1]),
         ) for request in requests]
         started = time.monotonic()
         outputs = engine.generate(prompt_token_ids=[prompt_token_ids[r[0]] for r in requests],
@@ -190,7 +191,7 @@ def audit_records(records, *, protocol, budget, seed, rows, per_rollout_cap, sto
             raise ValueError("Response gold answer mismatch")
         if record["request_sequence_index"] != sequence or record["rollout_index"] != attempts[p]:
             raise ValueError("Response sequence mismatch")
-        if record["rollout_seed"] != rollout_seed(seed, p, attempts[p]):
+        if record["rollout_seed"] != rollout_seed(seed, rows[p].get("seed_position", p), attempts[p]):
             raise ValueError("Response seed mismatch")
         length, cap, score = record["output_tokens"], record["max_output_tokens"], record["score"]
         if score not in (0, 1) or length != len(record["output_token_ids"]) or not 0 < length <= cap:

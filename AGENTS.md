@@ -5,6 +5,11 @@
 - Work in the primary `maxrl` directory on `agent/add-math12k-maxrl-launcher`.
 - Do not create or use temporary branches or sibling worktrees unless the user explicitly requests them.
 
+## Hugging Face Uploads
+
+- Project checkpoints and rollout datasets default to public Hugging Face repositories.
+- The user has also requested that earlier project training repositories be public. Apply that preference to existing upload destinations unless the user explicitly requests a private repository later.
+
 ## Project Structure & Module Organization
 
 Core Python code lives in `verl/`: trainers and Hydra-style YAML configuration are under `verl/trainer/`, distributed actors and rollout backends are under `verl/workers/`, and shared data, checkpoint, and metric helpers are under `verl/utils/`. Tests mirror these namespaces in `tests/`. Reusable training variants live in `recipe/`, while `examples/` contains preprocessing and launcher examples. Paper-specific entry points are grouped in `maze/`, `smollm/`, `imagenet/`, and `qwen3_experiments/`. Documentation, deployment helpers, and installation scripts live in `docs/`, `docker/`, and `scripts/`.

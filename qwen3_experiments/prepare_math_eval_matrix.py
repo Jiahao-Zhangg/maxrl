@@ -172,8 +172,10 @@ def prepare_model(spec: dict, scratch: Path, base: Path | None) -> dict:
         name = f"global_step{spec['step']}/mp_rank_00_model_states.pt"
         inventory = download_files(spec, [name, "train_config.json"], source)
         train = read_json(source / "train_config.json")
-        if train.get("pretrain") != "Qwen/Qwen3-1.7B-Base" or base is None:
+        if train.get("pretrain") != spec.get("base_repo", "Qwen/Qwen3-1.7B-Base") or base is None:
             raise ValueError("Unexpected ER base model")
+        if train.get("zero_stage") != 2 or train.get("lora_rank", 0) != 0:
+            raise ValueError("Actor-only extraction requires a full ZeRO-2 checkpoint without LoRA")
         checkpoint = torch.load(source / name, map_location="cpu", weights_only=False)
         state = checkpoint["module"]
         expected = tensor_inventory(base)
