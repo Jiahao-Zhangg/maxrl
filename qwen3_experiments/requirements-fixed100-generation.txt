@@ -1,0 +1,6 @@
+# Python 3.12; same generation stack as the archived compression evaluations.
+vllm==0.24.0
+transformers==5.9.0
+tokenizers==0.22.2
+huggingface-hub==1.19.0
+numpy==2.3.5
